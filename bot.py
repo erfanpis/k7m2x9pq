@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-SibStar IPA Scanner — Telegram bot v6 (Telethon / MTProto).
+SibStar IPA Scanner — Telegram bot v7 (Telethon / MTProto).
+
+v7 vs v6: the scanner's privacy answers are decisive now — no
+"capability" hedge ("فقط توانایی دارد") anywhere in the summary,
+the card or the report. With no server to send to, the answer is
+"نه — نمی‌فرسته".
 
 v6 vs v5: the chat summary is short (verdict first, risk, four privacy
 answers — no permission/tracker/domain lists, those live on the card and

@@ -1,7 +1,23 @@
 #!/usr/bin/env python3
 """
-SibStar IPA Scanner v6 — deep scan (stdlib only, no paid dependencies)
+SibStar IPA Scanner v7 — deep scan (stdlib only, no paid dependencies)
 Scans an iOS .ipa (ZIP containing Payload/*.app) WITHOUT decryption:
+
+  v7 vs v6 — DECISIVE verdicts, no hedging:
+  - The "capability" verdict is GONE. If static analysis finds no
+    unknown tweak server and no photo-upload endpoint, the answer to
+    "does it send photos to a third party?" is "نه — نمی‌فرسته"
+    (No, it cannot send), NOT "فقط توانایی دارد". Access without a
+    server means there is nowhere to send to — saying "it has the
+    capability" on top of that only scares people for no reason.
+  - Privacy answers are now TWO short plain-Persian lines each
+    (answer + evidence). Per-answer "limit" lines are removed: the
+    one allowed limit sentence — "تحلیل ایستا فقط آدرس‌های ثابت در
+    فایل را می‌بیند؛ آدرسی که در زمان اجرا ساخته شود، در فایل نیست."
+    — is stated ONCE, in the methodology section of the report,
+    never inside a verdict. Scores are unchanged (calibration kept).
+  - The PNG card footer and verdict words follow the same rule:
+    no "فقط توانایی دارد" anywhere.
 
   v6 vs v5:
   - Calibration: a clean legit app must score LOW. Trackers are now
@@ -27,9 +43,11 @@ Scans an iOS .ipa (ZIP containing Payload/*.app) WITHOUT decryption:
     risk: 0 points, low severity.
 
   v5 vs v4:
-  - Evidence verdicts: privacy answers use confirmed / no-evidence /
-    capability only. Capability (photo permission + analytics servers)
-    is NEVER reported as "yes" — it is not proof photos are sent.
+  - Evidence verdicts: privacy answers use confirmed / no-evidence.
+    (v7 removed the third "capability" verdict: it hedged and scared
+    people. Having photo permission + analytics servers is NOT proof
+    photos are sent, and with no server to send to, the answer is
+    a decisive "no", not "capability".)
   - Generic iOS APIs (ASIdentifierManager, IDFA/IDFV, PhotoKit, Speech)
     score 0 and are listed as info, never as suspicious patterns.
   - No double counting: an injected dylib's patterns are counted ONCE
@@ -237,24 +255,50 @@ SUSPICIOUS_PATTERNS = [
     (r"NEVPNManager|NEHotspotHelper", "مدیریت VPN / هات‌اسپات در کد", "VPN / hotspot management in code", 5),
     (r"CXCallObserver|CTCallCenter", "مشاهده تماس‌ها در کد", "Call observation in code", 6),
     (r"getifaddrs", "خواندن اینترفیس‌های شبکه (MAC / IP)", "Network interface enumeration", 5),
-    (r"\buname\(", "خواندن اطلاعات دستگاه (uname)", "Device info via uname", 3),
-    (r"\bptrace\(", "ضد دیباگ (ptrace)", "Anti-debugging (ptrace)", 6),
+    (r"uname\(", "خواندن اطلاعات دستگاه (uname)", "Device info via uname", 3),
+    (r"ptrace\(", "ضد دیباگ (ptrace)", "Anti-debugging (ptrace)", 6),
     (r"posix_spawn|execve|fork\(", "اجرای پروسس دیگر (spawn/exec/fork)", "Spawning another process", 7),
     (r"objc_copyClassList|objc_getClass", "جستجوی کلاس‌ها در ران‌تایم", "Runtime class introspection", 5),
     (r"_dyld_get_image_name|dyld_get_image", "بازرسی لودر داینامیک (dyld)", "Dynamic loader introspection", 4),
     (r"DYLD_INSERT_LIBRARIES", "بررسی تزریق کتابخانه (DYLD_INSERT_LIBRARIES)", "Library injection check", 4),
 ]
 
+# v7 (research: false positives from naive string matching): a bare
+# substring is not a finding — the symbol must actually appear as its
+# own token. _rx() wraps a pattern with letter/digit boundaries at
+# compile time. Plain \b is WRONG here: Mach-O symbols carry a leading
+# underscore ("_objc_copyClassList"), and "_" is a word character, so
+# \b before "objc_…" would never match a real symbol. The boundary
+# therefore treats "_" as a separator: "dlopen" inside "mydlopenfunc"
+# does not match (preceded by a letter), but "_dlopen" does.
+def _rx(pat):
+    """Compile a symbol pattern with token boundaries (see above)."""
+    if pat.endswith(r"\("):
+        return re.compile(r"(?<![A-Za-z0-9])(?:" + pat + r")")
+    return re.compile(r"(?<![A-Za-z0-9])(?:" + pat + r")(?![A-Za-z0-9])")
+
 # Generic iOS APIs (v5): used by thousands of legitimate apps — calling
 # them is normal, not suspicious. They are reported as info with 0 points
 # and never enter the suspicious list, the risk score, or the findings.
-# (regex, Persian label, English label)
+# (regex, Persian label, English label, note)
+# v7 (research §4): presence alone proves nothing, so each carries the
+# corroborating fact that decides it — IDFA is zeroed without ATT
+# authorisation, speech is only a server concern when on-device
+# recognition is NOT forced, and PHPicker needs no photo permission
+# at all (out-of-process, returns only the user's selections).
 GENERIC_API_PATTERNS = [
-    (r"ASIdentifierManager", "مدیر شناسه تبلیغاتی اپل", "ASIdentifierManager"),
-    (r"advertisingIdentifier", "شناسه تبلیغاتی (IDFA)", "advertisingIdentifier (IDFA)"),
-    (r"identifierForVendor", "شناسه فروشنده (IDFV)", "identifierForVendor (IDFV)"),
-    (r"PHPhotoLibrary|PHAsset", "دسترسی به گالری در کد (PhotoKit)", "PhotoKit access in code"),
-    (r"SFSpeechRecognizer", "تشخیص گفتار در کد", "Speech recognition in code"),
+    (r"ASIdentifierManager", "مدیر شناسه تبلیغاتی اپل", "ASIdentifierManager",
+     "شناسه‌ی تبلیغاتی فقط با مجوز ردیابی (ATT) مقدار واقعی دارد؛ بدون آن صفر برمی‌گرداند."),
+    (r"advertisingIdentifier", "شناسه تبلیغاتی (IDFA)", "advertisingIdentifier (IDFA)",
+     "شناسه‌ی تبلیغاتی فقط با مجوز ردیابی (ATT) مقدار واقعی دارد؛ بدون آن صفر برمی‌گرداند."),
+    (r"identifierForVendor", "شناسه فروشنده (IDFV)", "identifierForVendor (IDFV)",
+     "شناسه‌ی فروشنده برای آنالیتیکس خود برنامه است و به مجوز ردیابی نیاز ندارد."),
+    (r"PHPhotoLibrary|PHAsset", "دسترسی به گالری در کد (PhotoKit)", "PhotoKit access in code",
+     "دسترسی به گالری فقط با اجازه‌ی شما؛ انتخاب‌گر سیستمی (PHPicker) بدون دسترسی هم فقط عکس‌های انتخاب‌شده را می‌دهد."),
+    (r"PHPickerViewController", "انتخاب‌گر عکس سیستمی (PHPicker)", "PHPickerViewController",
+     "بدون دسترسی به گالری کار می‌کند و فقط عکس‌هایی را برمی‌گرداند که کاربر خودش انتخاب کرده است."),
+    (r"SFSpeechRecognizer", "تشخیص گفتار در کد", "Speech recognition in code",
+     None),  # note set per-binary below: on-device forced or not
 ]
 
 # Weak-crypto patterns (MobSF-style SAST rules, static strings only).
@@ -282,8 +326,10 @@ SECRET_PATTERNS = [
 ]
 
 # File paths that only exist on a jailbroken device / with substrate
-# injection. Found in strings, they are tampering evidence (dyld-image
-# enumeration is the runtime equivalent of this check).
+# injection. Found as literal strings, they are AMBIGUOUS (v7): the
+# same strings appear in jailbreak-detection code, and the paths
+# themselves are device state, not IPA contents. Never scored, never
+# a tampering signal on their own.
 JAILBREAK_PATH_MARKERS = [
     "/Library/MobileSubstrate/",
     "CydiaSubstrate",
@@ -302,6 +348,26 @@ MASVS_BY_CATEGORY = {
     "privacy": "MASVS-PRIVACY",
     "code": "MASVS-CODE",
     "tweak": "MASVS-RESILIENCE",
+}
+
+# Evidence tiers (v7, research §5.3): every finding carries one.
+#   "proven"       — found in this artefact (config, secret, injected file)
+#   "capability"   — the code/permission exists, but execution or sending
+#                    is NOT proven (gates: a config switch, OS permission)
+#   "needs-dynamic"— cannot be decided from the file alone (runtime check)
+# These tiers label FINDINGS, never the privacy answers: the answers
+# stay decisive ("نه — نمی‌فرسته") and never use the word "capability".
+EVIDENCE_TIERS = {
+    "proven": "اثبات‌شده",
+    "capability": "قابلیت",
+    "needs-dynamic": "نیاز به بررسی زمان اجرا",
+}
+TIER_BY_CATEGORY = {
+    "network": "proven",      # ATS config / endpoints are facts in the file
+    "permissions": "capability",
+    "privacy": "capability",
+    "code": "capability",     # code presence, not proven execution
+    "tweak": "proven",        # an injected file is in the bundle
 }
 HIGH_RISK_DATA_TYPES = {
     "NSPrivacyCollectedDataTypePreciseLocation": ("موقعیت دقیق", 8),
@@ -576,16 +642,25 @@ def framework_details(app_dir, frameworks):
     return out
 
 
-# Evidence levels for privacy answers (v5): static analysis can only ever
-# show capability + endpoints, never the actual runtime traffic. So every
-# answer uses one of three honest verdicts:
+# Evidence verdicts for privacy answers (v7): static analysis can only
+# ever show what is IN the artifact — declared data, fixed server
+# addresses, injected files. So every exfiltration question has one
+# of TWO decisive verdicts:
 #   "confirmed"   — direct evidence in the artifact (e.g. a manifest
 #                   declaration, an injected dylib present in the bundle)
-#   "no-evidence" — no evidence of it in static analysis
-#   "capability"  — the capability exists (permission / same-process
-#                   code), but sending/seeing it is NOT proven
-# Answering "بله" on capability alone is forbidden: having photo
-# permission and talking to analytics servers is NOT proof photos are sent.
+#   "no-evidence" — no evidence of it in static analysis. When there
+#                   is no unknown server and no upload endpoint, the
+#                   answer is a decisive "نه — نمی‌فرسته": access
+#                   without a server means there is nowhere to send
+#                   to. The old third verdict "capability" ("فقط
+#                   توانایی دارد") is REMOVED — it hedged, and hedging
+#                   scares users for no reason.
+# The one allowed limit sentence (a runtime-built address would not
+# appear in the file) is stated ONCE in the report's methodology
+# section — never inside a verdict, never repeated per answer.
+# Each answer is exactly TWO short plain-Persian lines: the answer
+# and ONE evidence line. "limits" is kept as an empty list so older
+# report/card JSON stays readable, but nothing is rendered from it.
 
 _UPLOAD_DOMAIN_KEYWORDS = ("upload", "photo", "image", "storage", "s3.",
                            "blob.", "drive.", "dropbox", "icloud",
@@ -624,11 +699,12 @@ def _plain_data_kind(dtype):
 def build_privacy_answers(r):
     """Answer the privacy questions for this IPA, in Persian.
 
-    Each answer has exactly three short plain-Persian lines:
-    a short answer, ONE evidence line and ONE limit line. No jargon,
-    no raw manifest constants in the answer text, no repeated warnings.
-    The tampering answer is a short summary — the full tampering
-    section lives elsewhere in the report and is never copy-pasted here.
+    Each answer has exactly two short plain-Persian lines:
+    a short answer and ONE evidence line. No jargon, no raw manifest
+    constants in the answer text, no repeated warnings, no per-answer
+    limit lines (v7). The tampering answer is a short summary — the
+    full tampering section lives elsewhere in the report and is never
+    copy-pasted here.
     """
     perms = {p["key"] for p in r.get("permissions", [])}
     pm = r.get("privacy_manifest") or {}
@@ -641,80 +717,88 @@ def build_privacy_answers(r):
     upload_domains = _photo_upload_domains(domains)
 
     # ---- Q5 first (the user's main question): tampering ----
-    if tamp.get("tampered"):
+    # v7: "confirmed" needs 2+ independent signals; one signal is
+    # "suspicious", never a confirmed verdict on its own.
+    if tamp.get("verdict") == "tampered":
         q5_verdict = "confirmed"
         q5_short = (f"تأیید شد — {tamp.get('injected_dylib_count', 0)} dylib تزریقی "
                      "(MobileSubstrate) در باندل است")
+    elif tamp.get("verdict") == "suspicious":
+        q5_verdict = "suspicious"
+        q5_short = ("مشکوک — یک نشانه‌ی دستکاری پیدا شد؛ برای حکم قطعی "
+                     "نشانه‌ی دوم لازم است")
     else:
         q5_verdict = "no-evidence"
         q5_short = "شواهدی از دستکاری پیدا نشد"
     q5_evidence = [tamp.get("server_note_fa", "")]
-    q5_limits = ["این بررسی فقط فایل‌های برنامه را می‌بیند؛ اینکه توئیک واقعاً "
-                 "چه داده‌ای می‌فرستد، فقط با رصد ترافیک زمان اجرا معلوم می‌شود."]
+    q5_limits = []  # v7: no per-answer limit lines (see module header)
 
     # ---- Q1: does it send photos/files to a server or cloud? ----
-    # A photo-upload endpoint is required even for "capability": photo
-    # permission + analytics servers (adjust-skadnetwork, firebaselogging,
-    # lokalise OTA, firebaseio) is NOT evidence of photo upload.
+    # Decisive (v7): an upload endpoint is a channel, not proof of
+    # sending — and with NO upload endpoint there is nowhere to send
+    # to, so the answer is a decisive "no", never "capability".
+    # Photo permission + analytics servers (adjust-skadnetwork,
+    # firebaselogging, lokalise OTA, firebaseio) is NOT evidence of
+    # photo upload.
     if upload_domains:
-        q1_verdict = "capability"
-        q1_short = ("فقط توانایی دارد — نقطه‌ی آپلود عکس هست، "
-                     "ولی ارسال واقعی عکس اثبات نشده است")
-        q1_evidence = [f"یک نقطه‌ی آپلود/ذخیره‌ی ابری پیدا شد "
-                       f"({', '.join(upload_domains)})؛ ولی اینکه واقعاً عکسی "
-                       "فرستاده شده باشد، اثبات نشده است."]
+        q1_verdict = "no-evidence"
+        q1_short = "نه — شواهدی از ارسال عکس نیست"
+        q1_evidence = [f"نقطه‌ی آپلود/ذخیره‌ی ابری هست "
+                       f"({', '.join(upload_domains)})، ولی مدرکی نیست که "
+                       "عکسی به آن فرستاده شده باشد."]
     else:
         q1_verdict = "no-evidence"
-        q1_short = "شواهدی نیست — مدرکی از ارسال عکس به سرور پیدا نشد"
+        q1_short = "نه — نمی‌فرسته؛ نقطه‌ی آپلودی نیست"
         if photo_perm and domains:
             q1_evidence = ["دسترسی به گالری عکس اعلام شده است، ولی هیچ‌کدام از "
                            f"{len(domains)} سروری که برنامه با آن‌ها حرف می‌زند "
-                           "جای آپلود عکس نیست."]
+                           "جای آپلود عکس نیست؛ بدون نقطه‌ی آپلود، عکسی "
+                           "فرستاده نمی‌شود."]
         elif photo_perm:
             q1_evidence = ["دسترسی به گالری عکس اعلام شده است، ولی هیچ سروری "
-                           "در باندل پیدا نشد."]
+                           "در باندل پیدا نشد؛ بدون سرور، عکسی فرستاده نمی‌شود."]
         elif domains:
             q1_evidence = ["دسترسی به گالری عکس اعلام نشده است و هیچ نقطه‌ی "
                            "آپلودی پیدا نشد."]
         else:
             q1_evidence = ["دسترسی به گالری عکس اعلام نشده است و هیچ سروری "
                            "در باندل پیدا نشد."]
-    q1_limits = ["اینکه واقعاً چه فایلی و چه زمانی فرستاده می‌شود، فقط با رصد "
-                 "ترافیک زمان اجرا معلوم می‌شود."]
+    q1_limits = []
 
     # ---- Q2: could the mod maker / a third party see user photos/videos? ----
-    # A tweak runs inside the app process, so it can technically reach
-    # what the app reaches — that is capability, never proof of seeing.
+    # Decisive (v7): a tweak runs inside the app process, so it can
+    # technically reach what the app reaches — but "can reach" is not
+    # "does send". With no server to send to, there is nowhere for the
+    # photos to go, so the answer is "no", never "capability". An
+    # unknown tweak server is a channel, not proof that photos went
+    # to it — the answer stays "no evidence", and the server itself
+    # is already named in the tampering verdict and the risk score.
     if tamp.get("tampered"):
-        q2_verdict = "capability"
-        q2_short = ("فقط توانایی دارد — توئیک در همان پروسس برنامه اجرا می‌شود و "
-                     "از نظر فنی به عکس‌ها دسترسی دارد، ولی دیدن یا دریافت "
-                     "آن‌ها اثبات نشده است")
+        q2_verdict = "no-evidence"
         unknown = tamp.get("unknown_tweak_servers") or []
         if unknown:
-            q2_evidence = [f"توئیک در همان پروسس برنامه اجرا می‌شود و با این سرور "
-                           f"ناشناخته حرف می‌زند: {', '.join(unknown)}؛ ولی اینکه "
-                           "واقعاً عکسی فرستاده باشد، اثبات نشده است."]
+            q2_short = "نه — شواهدی از دیدن یا دریافت عکس نیست"
+            q2_evidence = [f"توئیک با سرور ناشناخته‌ی {', '.join(unknown)} حرف "
+                           "می‌زند، ولی مدرکی نیست که عکسی به آن فرستاده شده باشد."]
         else:
-            q2_evidence = ["توئیک در همان پروسس برنامه اجرا می‌شود و از نظر فنی "
-                           "به عکس‌ها دسترسی دارد، ولی سروری برای ارسال آن‌ها "
-                           "پیدا نشد."]
+            q2_short = "نه — نمی‌فرسته؛ سروری برای ارسال نیست"
+            q2_evidence = ["توئیک در همان پروسس برنامه اجرا می‌شود، ولی در "
+                           "رشته‌های dylibها هیچ سروری پیدا نشد؛ بدون سرور، "
+                           "جایی برای فرستادن عکس نیست."]
     elif trackers:
-        q2_verdict = "capability"
-        q2_short = ("فقط توانایی دارد — ترکرها داده می‌فرستند، ولی دیدن عکس "
-                     "اثبات نشده است")
+        q2_verdict = "no-evidence"
+        q2_short = "نه — شواهدی از دیدن عکس نیست"
         q2_evidence = ["ترکرهایی مثل "
                        + "، ".join(t["tracker"] for t in trackers[:3])
                        + " در برنامه‌اند؛ آن‌ها رویداد و شناسه می‌فرستند، نه عکس."]
     else:
         q2_verdict = "no-evidence"
-        q2_short = "شواهدی نیست"
+        q2_short = "نه — شواهدی نیست"
         q2_evidence = ["نه دستکاری تأیید شد، نه ترکر/SDK شناخته‌شده‌ای پیدا شد."]
     if encrypted:
         q2_evidence = [q2_evidence[0] + " باینری رمزگذاری‌شده است؛ الگوهای "
                        "باینری اصلی بررسی نشد."]
-    q2_limits = ["اینکه توئیک یا ترکر واقعاً چه دیده، فقط با رصد ترافیک زمان "
-                 "اجرا معلوم می‌شود."]
+    q2_limits = []
 
     # ---- Q3: does it collect user photo/file info? ----
     # A manifest declaration IS direct evidence of declared collection.
@@ -743,22 +827,21 @@ def build_privacy_answers(r):
         q3_short = "تأیید شد — در مانیفست اعلام شده است"
         q3_evidence = [f"سازنده در مانیفست اعلام کرده «{kinds}» جمع می‌کند، {how}."]
     elif collected or analytics:
-        q3_verdict = "capability"
-        q3_short = "فقط توانایی دارد — داده جمع می‌شود، ولی جمع‌آوری عکس اعلام نشده است"
+        q3_verdict = "no-evidence"
+        q3_short = "نه — جمع‌آوری عکس اعلام نشده است"
         if analytics:
             q3_evidence = [f"مانیفست {len(collected)} نوع داده اعلام می‌کند، ولی "
-                           "«عکس/ویدیو» در آن نیست؛ ترکرهای تحلیلی در برنامه‌اند و "
-                           "رویداد و شناسه می‌فرستند، نه عکس."]
+                           "«عکس/ویدیو» در آن نیست؛ ترکرهای تحلیلی رویداد و "
+                           "شناسه می‌فرستند، نه عکس."]
         else:
             q3_evidence = [f"مانیفست {len(collected)} نوع داده اعلام می‌کند، ولی "
                            "«عکس/ویدیو» در آن نیست."]
     else:
         q3_verdict = "no-evidence"
-        q3_short = "شواهدی نیست — جمع‌آوری عکس اعلام نشده است"
+        q3_short = "نه — جمع‌آوری عکس اعلام نشده است"
         q3_evidence = ["مانیفست حریم خصوصی هیچ نوع داده‌ی جمع‌آوری‌شده‌ای اعلام "
                        "نکرده است."]
-    q3_limits = ["مانیفست فقط چیزی را نشان می‌دهد که سازنده اعلام کرده است؛ "
-                 "جمع‌آوری اعلام‌نشده با این اسکن قابل رد نیست."]
+    q3_limits = []  # v7: no per-answer limit lines (see module header)
 
     # ---- Q4: clear verdict — what was verified, what could not be verified ----
     # v5: the final verdict follows the risk SCORE, not the tampering
@@ -768,26 +851,33 @@ def build_privacy_answers(r):
     _score = r.get("risk", {}).get("score", 0)
     q4_evidence = [f"اسکن ایستا کامل شد؛ امضا، مانیفست، دامنه‌ها و باینری بررسی "
                    f"شد و ریسک {_score} از 100 شد."]
-    if tamp.get("tampered"):
+    if tamp.get("verdict") == "tampered":
         q4_evidence = [q4_evidence[0] +
                        f" دستکاری شخص ثالث تأیید شد: {tamp.get('injected_dylib_count', 0)} "
                        "dylib تزریقی."]
+    elif tamp.get("verdict") == "suspicious":
+        q4_evidence = [q4_evidence[0] +
+                       " یک نشانه‌ی دستکاری پیدا شد (dylib تزریقی)؛ برای حکم "
+                       "قطعی نشانه‌ی دوم لازم است."]
     if encrypted:
         q4_evidence = [q4_evidence[0] +
                        " باینری رمزگذاری‌شده است (FairPlay)؛ تحلیل رشته‌ها انجام نشد."]
-    q4_limits = ["ترافیک واقعی شبکه و اینکه سازنده‌ی ماد واقعاً چه می‌بیند، فقط با "
-                 "رصد ترافیک زمان اجرا مشخص می‌شود."]
+    q4_limits = []  # v7: no per-answer limit lines (see module header)
     if encrypted and not tamp.get("tampered"):
         q4_verdict, q4_short = "partial", "بررسی ناقص — باینری رمزگذاری‌شده است"
     elif _score >= 60:
         q4_verdict, q4_short = ("risky",
             "دستکاری شخص ثالث تأیید شد؛ با احتیاط استفاده کنید"
-            if tamp.get("tampered") else
+            if tamp.get("verdict") == "tampered" else
+            "دستکاری مشکوک است؛ با احتیاط استفاده کنید"
+            if tamp.get("verdict") == "suspicious" else
             "چند نشانه‌ی واقعی دارد؛ با احتیاط استفاده کنید")
     elif _score >= 30:
         q4_verdict, q4_short = ("caution",
             "دستکاری شخص ثالث تأیید شد؛ با احتیاط استفاده کنید"
-            if tamp.get("tampered") else
+            if tamp.get("verdict") == "tampered" else
+            "دستکاری مشکوک است؛ با احتیاط استفاده کنید"
+            if tamp.get("verdict") == "suspicious" else
             "چند نکته‌ی حریم خصوصی دارد، جای نگرانی جدی نیست")
     else:
         q4_verdict, q4_short = "ok", "نشانه‌ی جدی پیدا نشد"
@@ -820,6 +910,50 @@ def build_privacy_answers(r):
 URL_RE = re.compile(rb"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
 ASCII_STR_RE = re.compile(rb"[ -~]{4,}")
 UTF16_STR_RE = re.compile(rb"(?:[ -~]\x00){4,}")
+
+
+def _mask_xml_noise(data):
+    """Blank out XML comments (<!-- ... -->) and DOCTYPE declarations
+    before URL extraction (v7, research: never regex http:// over raw
+    text). A URL inside a comment or a DOCTYPE — e.g. the Apple DTD
+    line in every plist — is documentation, not an endpoint the app
+    calls. Masking keeps byte offsets intact (spaces, same length).
+    Base64 blobs need no special handling here: the base64 alphabet
+    has no ':', so a literal "http://" cannot occur inside one."""
+    out = bytearray(data)
+    for start_tok, end_tok in ((b"<!--", b"-->"), (b"<!DOCTYPE", b">")):
+        i = 0
+        while True:
+            s = data.find(start_tok, i)
+            if s < 0:
+                break
+            e = data.find(end_tok, s + len(start_tok))
+            end = (e + len(end_tok)) if e >= 0 else len(data)
+            out[s:end] = b" " * (end - s)
+            i = end
+    return bytes(out)
+
+
+def _iter_urls(data):
+    """Yield (url, in_xml_noise) for every http(s) URL in raw bytes.
+
+    in_xml_noise is True when the match lies inside an XML comment or
+    a DOCTYPE declaration — documentation, never an endpoint the app
+    calls. The mask blanks noise with spaces at the same offsets, so
+    a match whose span is all spaces in the masked copy was inside
+    noise. Masked URLs are still YIELDED (not dropped): callers record
+    them in the ignored list with their reason, so the report stays
+    transparent about what was excluded — dropping them silently
+    would hide the 39 ignored namespace/docs strings a real scan
+    (PDF Hero) legitimately shows.
+    """
+    masked = _mask_xml_noise(data)
+    for m in URL_RE.finditer(data):
+        u = m.group(0).decode("ascii", "ignore").rstrip(".,);\"'")
+        in_noise = masked[m.start():m.end()].strip() == b""
+        yield u, in_noise
+
+
 # Apple DTD is a known false positive inside mobileprovision — never count it.
 APPLE_DTD_HOST = "www.apple.com"
 
@@ -1030,11 +1164,14 @@ def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES):
     except Exception as e:
         return {"error": str(e)}
     urls, domains, http_urls, ignored = set(), set(), set(), []
-    for m in URL_RE.finditer(data):
-        u = m.group(0).decode("ascii", "ignore").rstrip(".,);\"'")
+    for u, in_noise in _iter_urls(data):
         kind = classify_url(u)
-        if kind != "network":
-            ignored.append({"url": u, "reason": kind})
+        if in_noise or kind != "network":
+            # Inside an XML comment/DOCTYPE: documentation, not an
+            # endpoint. Keep the classifier's reason when it already
+            # says namespace/docs/invalid; a real-looking URL in a
+            # comment is still just docs.
+            ignored.append({"url": u, "reason": kind if kind != "network" else "docs"})
             continue
         urls.add(u)
         host = urlparse(u).hostname
@@ -1045,19 +1182,29 @@ def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES):
     strings = extract_strings(data)
     hits = []
     for pat, fa, en, pts in SUSPICIOUS_PATTERNS:
-        rx = re.compile(pat)
+        rx = _rx(pat)  # v7: token boundaries, not bare substrings
         count = sum(1 for s in strings if rx.search(s))
         if count:
             hits.append({"pattern": pat, "label_fa": fa, "label_en": en,
                          "points": pts, "matches": count})
     # Generic iOS APIs (v5): counted separately, 0 points, never suspicious.
     generic = []
-    for pat, fa, en in GENERIC_API_PATTERNS:
-        rx = re.compile(pat)
+    _on_device_speech = any("requiresOnDeviceRecognition" in s for s in strings)
+    for pat, fa, en, *note in GENERIC_API_PATTERNS:
+        rx = _rx(pat)  # v7: token boundaries, not bare substrings
         count = sum(1 for s in strings if rx.search(s))
         if count:
+            # v7: the speech note depends on the corroborating flag —
+            # on-device forced means audio stays on the device; without
+            # the flag, presence alone proves nothing about where audio goes.
+            n = note[0] if note else None
+            if en == "Speech recognition in code":
+                n = ("تشخیص گفتار روی دستگاه اجباری شده است (on-device)."
+                     if _on_device_speech else
+                     "حضور فریم‌ورک مدرک ارسال صدا به سرور نیست؛ روی دستگاه "
+                     "یا سرور بودن از روی رشته‌ها مشخص نیست.")
             generic.append({"pattern": pat, "label_fa": fa, "label_en": en,
-                            "points": 0, "matches": count})
+                            "points": 0, "matches": count, "note": n})
     return {"string_count": len(strings), "urls": sorted(urls),
             "domains": sorted(domains), "insecure_http_urls": sorted(http_urls),
             "ignored_urls": ignored, "suspicious": hits, "generic_apis": generic}
@@ -1085,11 +1232,11 @@ def scan_bundle_files(app_dir):
             data = p.read_bytes()
         except Exception:
             continue
-        for m in URL_RE.finditer(data):
-            u = m.group(0).decode("ascii", "ignore").rstrip(".,);\"'")
+        for u, in_noise in _iter_urls(data):
             kind = classify_url(u)
-            if kind != "network":
-                ignored.append({"url": u, "reason": kind,
+            if in_noise or kind != "network":
+                ignored.append({"url": u,
+                                "reason": kind if kind != "network" else "docs",
                                 "file": str(p.relative_to(app_dir))})
                 continue
             urls.add(u)
@@ -1379,12 +1526,15 @@ def analyze_appex(app_dir):
 
 
 def find_jailbreak_artifacts(strings_by_source):
-    """Jailbreak/substrate artifact paths found in binary/dylib strings.
+    """Jailbreak/substrate artifact paths found as literal strings in
+    binary/dylib strings.
 
-    The runtime equivalent is enumerating dyld images and comparing
-    them with the legitimate set; statically, a substrate path string
-    in the main binary is evidence the code knows about (or ships)
-    jailbreak tooling. Returns [{marker, source}]."""
+    v7 (research): these paths are DEVICE STATE, not IPA contents — a
+    clean IPA on disk cannot contain them as files. A literal string
+    is only an ambiguous hint: the app may itself contain jailbreak
+    *detection* code that references the same paths. So these markers
+    are reported as ambiguous, never scored, and never counted as a
+    tampering signal. Returns [{marker, source}]."""
     found, seen = [], set()
     for source, strings in (strings_by_source or {}).items():
         for s in strings or []:
@@ -1544,12 +1694,27 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
     the original company, and whether the injected code talks to its own
     server. Returns the tampering dict stored in result["tampering"].
 
-    Signals (strongest first):
+    Signals (independent types — v7, research: a tamper verdict needs
+    ≥2 independent signals, never one alone):
     1. A dylib whose install name lives in /Library/MobileSubstrate/
        DynamicLibraries/ — normal App Store apps never ship those; that
        is a jailbreak tweak injected into the app process.
-    2. A .deb package whose files live under Library/MobileSubstrate.
-    3. Substrate loader files present in the bundle.
+    2. A patch/tweak-like dylib filename (patch, blatant, sideload…).
+    3. A .deb package whose files live under Library/MobileSubstrate.
+    4. Substrate loader files present in the bundle.
+    5. An unknown tweak server — a tweak dylib domain the original
+       app never talks to.
+    6. Hooking behaviour inside an injected dylib (keychain / dyld /
+       runtime class introspection patterns).
+    7. A code-signature anomaly: the provisioning Team ID differs
+       from the entitlements Team ID, or get-task-allow is on (a debug
+       build, not a release build).
+    Verdict: 0 signals → not found; 1 signal → "suspicious" (one
+    signal is a lead, not proof — a second signal is required for a
+    confirmed verdict); 2+ → "tampered" (confirmed).
+    Jailbreak filesystem-path *strings* are NOT a signal here: those
+    paths are device state, and the same strings appear in jailbreak
+    *detection* code — they are listed separately as ambiguous.
     Per-dylib domains/URLs are compared against the original app's
     network domains: a tweak dylib domain that the original app never
     talks to is an "unknown tweak server".
@@ -1611,10 +1776,49 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
     ]
     tweak_http = sorted({u for d in injected for u in (d.get("insecure_http_urls") or [])})
 
+    # ---- Independent corroborating signals (v7) ----
+    signals = []
+    if injected:
+        signals.append(f"dylib تزریقی با install name در MobileSubstrate "
+                       f"({len(injected)} مورد)")
+    if any(any(h in (d.get("name") or "").lower()
+               for h in ("patch", "blatant", "sideload", "keychainfix"))
+           for d in injected):
+        signals.append("نام فایل نشانه‌ی پچ/توئیک است")
+    if tweak_debs:
+        signals.append("بسته‌ی .deb توئیک در باندل است")
+    if substrate_files:
+        signals.append("فایل MobileSubstrate در باندل است")
+    if unknown_tweak_servers:
+        signals.append("توئیک با سرور ناشناخته حرف می‌زند: "
+                       + "، ".join(unknown_tweak_servers))
+    _hook_labels = {"دسترسی به کی‌چین", "بازرسی لودر داینامیک (dyld)",
+                    "جستجوی کلاس‌ها در ران‌تایم"}
+    if any(h.get("label_fa") in _hook_labels
+           for d in injected for h in (d.get("suspicious") or [])):
+        signals.append("الگوهای هوک/کی‌چین در dylib تزریقی")
+    _prov_team = (result.get("provisioning") or {}).get("team")
+    _ent_team = (result.get("entitlements") or {}).get(
+        "com.apple.developer.team-identifier")
+    if _prov_team and _ent_team and _prov_team != _ent_team:
+        signals.append(f"Team ID پروفایل ({_prov_team}) با Team ID در "
+                       f"entitlements ({_ent_team}) فرق می‌کند")
+    if (result.get("entitlements") or {}).get("get-task-allow") is True:
+        signals.append("get-task-allow فعال است (بیلد دیباگ، نه انتشار)")
+
     tampered = bool(injected or tweak_debs or substrate_files)
-    if tampered:
+    signal_count = len(signals)
+    if signal_count >= 2:
         verdict_fa = "تأیید شد — دستکاری شخص ثالث"
         verdict_en = "tampered"
+    elif signal_count == 1:
+        verdict_fa = ("مشکوک — یک نشانه‌ی دستکاری پیدا شد؛ برای حکم قطعی "
+                      "نشانه‌ی دوم لازم است")
+        verdict_en = "suspicious"
+    else:
+        verdict_fa = "شواهدی از دستکاری شخص ثالث پیدا نشد"
+        verdict_en = "not-found"
+    if tampered:
         if unknown_tweak_servers:
             server_note = ("dylibهای تزریقی با این سرورهای ناشناخته صحبت می‌کنند: "
                            + "، ".join(unknown_tweak_servers))
@@ -1627,16 +1831,14 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
                            "پیدا نشد — یعنی شواهدی از ارسال مستقیم داده به "
                            "سرور شخص ثالث نیست.")
     else:
-        verdict_fa = "شواهدی از دستکاری شخص ثالث پیدا نشد"
-        verdict_en = "not-found"
         server_note = ("هیچ dylib تزریقی (MobileSubstrate)، بسته‌ی .deb توئیک "
                        "یا فایل Substrate در باندل پیدا نشد.")
+    # v7: one neutral sentence only — the runtime-traffic scare is
+    # gone. This list is JSON-only; the same sentence appears once
+    # in the report's methodology section.
     limits = [
-        "تحلیل ایستا فقط رشته‌ها و دامنه‌های ثابت در فایل را می‌بیند؛ "
-        "آدرس سرور می‌تواند در زمان اجرا ساخته شود یا dylib می‌تواند از "
-        "اتصال شبکه‌ی خود برنامه استفاده کند، بدون اینکه سرور جداگانه‌ای داشته باشد.",
-        "اینکه dylib تزریقی واقعاً چه داده‌ای می‌فرستد فقط با رصد ترافیک "
-        "زمان اجرا (پراکسی/لاگ شبکه) مشخص می‌شود.",
+        "تحلیل ایستا فقط آدرس‌های ثابت در فایل را می‌بیند؛ آدرسی که در "
+        "زمان اجرا ساخته شود، در فایل نیست.",
     ]
     if result.get("binary", {}).get("encrypted") is True:
         limits.append("باینری اصلی رمزگذاری‌شده است؛ الگوهای باینری اصلی قابل بررسی نبود.")
@@ -1644,7 +1846,9 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
         "tampered": tampered,
         "verdict": verdict_en,
         "verdict_fa": verdict_fa,
-        "confidence": "high" if tampered else "medium",
+        "confidence": "high" if verdict_en == "tampered" else "medium",
+        "signals": signals,
+        "signal_count": signal_count,
         "injected_dylibs": injected,
         "injected_dylib_count": len(injected),
         "tweak_deb_packages": [p.get("package") or p.get("name") for p in tweak_debs],
@@ -1667,7 +1871,7 @@ def scan_ipa(ipa_path, workdir):
         "file": str(ipa_path),
         **hashes_of(ipa_path),
         "size_bytes": ipa_path.stat().st_size,
-        "scanner": "sibstar-ipa-scanner 6.0 (stdlib only)",
+        "scanner": "sibstar-ipa-scanner 7.0 (stdlib only)",
         "limits": [
             "IPAهای اپ‌استور با FairPlay رمزگذاری شده‌اند؛ تحلیل رشته‌ها و الگوهای باینری بدون نسخه‌ی رمزگشایی‌شده ممکن نیست.",
             "این اسکن بدون رمزگشایی، Info.plist، مانیفست حریم خصوصی، فریم‌ورک‌ها، entitlements، ATS و URLها را می‌خواند.",
@@ -1975,10 +2179,13 @@ def scan_ipa(ipa_path, workdir):
         result, dylib_analysis, deb_packages, substrate_files)
     # Jailbreak/substrate artifact strings are weaker evidence than an
     # injected dylib: they join the evidence list but do not by
-    # themselves flip the verdict.
+    # themselves flip the verdict. v7: they are AMBIGUOUS — the same
+    # strings appear in jailbreak-detection code — so they are labelled
+    # as such and never scored or counted as a tampering signal.
     for _art in result.get("jailbreak_artifacts", []):
         result["tampering"]["evidence"].append(
-            f"نشانه‌ی جیلبریک/توئیک در رشته‌ها ({_art['source']}): {_art['marker']}")
+            f"رشته‌ی مسیر جیلبریک در کد ({_art['source']}): {_art['marker']} "
+            "(مبهم — ممکن است کد تشخیص جیلبریک خود برنامه باشد، نه مدرک دستکاری)")
 
     # ---- Risk score v6: calm and accurate, never inflated ----
     # v6 recalibration (a clean legit app must score LOW):
@@ -2007,7 +2214,7 @@ def scan_ipa(ipa_path, workdir):
     score, breakdown = 0, []
 
     def add(points, reason, source="original", category="code",
-            masvs=None, confidence="medium"):
+            masvs=None, confidence="medium", tier=None):
         nonlocal score
         cap = CATEGORY_CAPS.get(category, 12)
         counted = max(0, min(points, cap - cat_used.get(category, 0)))
@@ -2020,7 +2227,8 @@ def scan_ipa(ipa_path, workdir):
         breakdown.append({"points": counted, "reason": reason,
                           "source": source, "category": category,
                           "masvs": masvs or MASVS_BY_CATEGORY.get(category, "MASVS-CODE"),
-                          "confidence": confidence})
+                          "confidence": confidence,
+                          "evidence_tier": tier or TIER_BY_CATEGORY.get(category, "capability")})
     if result["ats"]["allows_arbitrary_loads"]:
         add(6, "NSAllowsArbitraryLoads فعال است — ترافیک رمزنگاری‌نشده مجاز است",
             category="network")
@@ -2040,7 +2248,7 @@ def scan_ipa(ipa_path, workdir):
                      "NSLocationTemporaryUsageDescriptionDictionary"}
     loc_perms = [p for p in perms if p["key"] in LOCATION_KEYS]
     keep_loc = max(loc_perms, key=lambda p: p["risk"])["key"] if loc_perms else None
-    # v5: permissions score LOW. A permission is a capability, not a
+    # v5: permissions score LOW. A permission is a declaration, not a
     # threat on its own. When the usage description says the access is
     # for ads, it scores 1 point at most and the reason says so in plain
     # words — it is never presented as a medium/high threat.
@@ -2119,7 +2327,8 @@ def scan_ipa(ipa_path, workdir):
     # never be starved out by the code cap), then binary patterns.
     for sec in result.get("hardcoded_secrets", []):
         add(6, f"رمز/توکن سخت‌کدشده در باندل: {sec['type_fa']} ({sec['source']})",
-            category="code", masvs="MASVS-STORAGE", confidence="high")
+            category="code", masvs="MASVS-STORAGE", confidence="high",
+            tier="proven")
     if bin_strings and not bin_strings.get("unavailable"):
         for hit in bin_strings.get("suspicious", []):
             add(hit["points"], f"الگوی مشکوک در باینری: {hit['label_fa']} ({hit['matches']} مورد)",
@@ -2127,7 +2336,8 @@ def scan_ipa(ipa_path, workdir):
     for wc in result.get("weak_crypto", []):
         add(wc["points"], f"{wc['label_fa']} ({wc.get('source', 'باینری اصلی')}) — "
             "وجود رشته به‌تنهایی به معنی استفاده نیست",
-            category="code", masvs="MASVS-CRYPTO", confidence="low")
+            category="code", masvs="MASVS-CRYPTO", confidence="low",
+            tier="needs-dynamic")
     prot = result.get("binary_protections") or {}
     if prot.get("available"):
         if not prot.get("pie"):
@@ -2145,10 +2355,13 @@ def scan_ipa(ipa_path, workdir):
             h.get("points", 0)
             for d in dylib_analysis if d.get("name") in injected_names
             for h in d.get("suspicious", []))
-        add(min(25, 8 + injected_pts),
-            f"دستکاری شخص ثالث: {tamp.get('injected_dylib_count', 0)} dylib تزریقی "
-            "(MobileSubstrate) در باندل است", source="tweak", category="tweak",
-            confidence="high")
+        _tamp_reason = (f"دستکاری شخص ثالث: {tamp.get('injected_dylib_count', 0)} dylib تزریقی "
+                        "(MobileSubstrate) در باندل است")
+        if tamp.get("verdict") == "suspicious":
+            _tamp_reason = (f"دستکاری مشکوک: {tamp.get('injected_dylib_count', 0)} dylib با نشانه‌ی "
+                            "MobileSubstrate — برای حکم قطعی نشانه‌ی دوم لازم است")
+        add(min(25, 8 + injected_pts), _tamp_reason,
+            source="tweak", category="tweak", confidence="high")
     for d in dylib_analysis:
         if d.get("name") in injected_names:
             continue  # counted once inside the tampering line above
@@ -2185,27 +2398,38 @@ def scan_ipa(ipa_path, workdir):
                       "reasons": [b["reason"] for b in breakdown]}
 
     # ---- Per-finding severity list (v3) ----
+    # v7: every finding carries an evidence tier (proven / capability /
+    # needs-dynamic) with its Persian label — see EVIDENCE_TIERS.
     findings = []
     for b in breakdown:
         if b.get("points", 0) > 0:
+            _tier = b.get("evidence_tier", "capability")
             findings.append({"severity": severity_for_points(b["points"]),
                              "category": "risk", "title_fa": b["reason"],
                              "points": b["points"],
                              "masvs": b.get("masvs", "MASVS-CODE"),
-                             "confidence": b.get("confidence", "medium")})
+                             "confidence": b.get("confidence", "medium"),
+                             "evidence_tier": _tier,
+                             "evidence_tier_fa": EVIDENCE_TIERS.get(_tier, _tier)})
     for d in dylib_analysis:
         if d.get("unavailable"):
             findings.append({"severity": "info", "category": "dylib",
                              "title_fa": f"dylib {d['name']}: {d['unavailable']}", "points": 0,
-                             "masvs": "MASVS-RESILIENCE", "confidence": "high"})
+                             "masvs": "MASVS-RESILIENCE", "confidence": "high",
+                             "evidence_tier": "proven",
+                             "evidence_tier_fa": EVIDENCE_TIERS["proven"]})
     if not (pm and not pm.get("error")) and result.get("privacy_manifest") is None:
         findings.append({"severity": "medium", "category": "privacy-manifest",
                          "title_fa": "مانیفست حریم خصوصی (PrivacyInfo.xcprivacy) در باندل نیست", "points": 0,
-                         "masvs": "MASVS-PRIVACY", "confidence": "high"})
+                         "masvs": "MASVS-PRIVACY", "confidence": "high",
+                         "evidence_tier": "proven",
+                         "evidence_tier_fa": EVIDENCE_TIERS["proven"]})
     if result.get("provisioning") and result["provisioning"].get("expired"):
         findings.append({"severity": "high", "category": "provisioning",
                          "title_fa": "پروفایل provisioning منقضی شده است", "points": 0,
-                         "masvs": "MASVS-PLATFORM", "confidence": "high"})
+                         "masvs": "MASVS-PLATFORM", "confidence": "high",
+                         "evidence_tier": "proven",
+                         "evidence_tier_fa": EVIDENCE_TIERS["proven"]})
     result["findings"] = sorted(
         findings,
         key=lambda f: {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}[f["severity"]])
@@ -2236,7 +2460,7 @@ def scan_ipa(ipa_path, workdir):
     return result
 
 def render_report(r):
-    """Markdown report (v6 layout).
+    """Markdown report (v7 layout).
 
     First screen first: the verdict, the risk score with its
     original/tweak split, the tampering verdict, and the privacy
@@ -2263,6 +2487,9 @@ def render_report(r):
     L.append("")
     L.append("## دستکاری شخص ثالث / توئیک")
     L.append(f"**حکم: {tamp.get('verdict_fa', '—')}**")
+    if tamp.get("signals"):
+        L.append(f"- نشانه‌های مستقل دستکاری ({tamp.get('signal_count', len(tamp['signals']))} مورد): "
+                 + "؛ ".join(tamp["signals"]))
     if tamp.get("unknown_tweak_servers"):
         L.append(f"- ⚠️ سرورهای ناشناخته‌ی توئیک: {', '.join(tamp['unknown_tweak_servers'])}")
     else:
@@ -2271,7 +2498,7 @@ def render_report(r):
         L.append(f"- بسته‌های .deb توئیک: {', '.join(tamp['tweak_deb_packages'])}")
     _jb_markers = sorted({a["marker"] for a in (r.get("jailbreak_artifacts") or [])})
     if _jb_markers:
-        L.append(f"- نشانه‌ی جیلبریک/توئیک در رشته‌ها: {', '.join(_jb_markers)}")
+        L.append(f"- رشته‌های مسیر جیلبریک در کد (مبهم — ممکن است کد تشخیص جیلبریک خود برنامه باشد، نه مدرک دستکاری): {', '.join(_jb_markers)}")
     if tamp.get("injected_dylibs"):
         L.append("")
         L.append("### dylibهای تزریقی — هر کدام جدا")
@@ -2304,6 +2531,16 @@ def render_report(r):
             for lim in a.get("limits", [])[:1]:
                 L.append(f"- محدودیت: {lim}")
             L.append("")
+    # v7 (research): every report carries a "What this scan cannot
+    # tell you" box, in plain language — static analysis is assistive,
+    # not conclusive (OWASP), and a human must review the output.
+    L.append("## این اسکن چه چیزی را نمی‌گوید")
+    L.append("- ترافیک واقعی شبکه را نمی‌بیند؛ اینکه واقعاً چه داده‌ای فرستاده شد، از روی فایل مشخص نیست.")
+    L.append("- رفتار زمان اجرا را ثابت نمی‌کند: اینکه کد واقعاً اجرا شد، مجوز واقعاً گرفته شد، یا پینینگ واقعاً کار کرد.")
+    L.append("- سمت سرور را بررسی نمی‌کند؛ برنامه می‌تواند همه‌ی بررسی‌های سمت کاربر را پاس کند و سرورش مشکل داشته باشد.")
+    L.append("- باینری رمزگذاری‌شده (FairPlay) را نمی‌تواند کامل بررسی کند؛ بخش‌های کد آن «در دسترس نیست» اعلام می‌شوند، نه «تمیز».")
+    L.append("- این ابزار کمکی است، نه حکم قطعی؛ نتیجه را یک انسان باید بررسی کند (OWASP: ابزارهای خودکار هم مثبت کاذب دارند هم منفی کاذب).")
+    L.append("")
     if r.get("risk"):
         L.append("## چرا این امتیاز؟ — تفکیک ریسک")
         for b in r["risk"]["breakdown"]:
@@ -2317,6 +2554,7 @@ def render_report(r):
                 L.append(f"- (سقف دسته‌ی {_cat_fa[_cat]} پر شد — امتیازی اضافه نشد): "
                          + "؛ ".join(_notes))
         L.append("- جمع امتیازهای بالا دقیقاً برابر ریسک کلی است (بدون دوباره‌شماری).")
+        L.append("- امتیاز حکم امنیتی نیست؛ فقط نشان می‌دهد چند قانون رد شده است و چرا — یک برنامه می‌تواند امتیاز بالا بگیرد و خطر واقعی‌اش کم باشد، یا برعکس.")
         L.append("")
     L.append("---")
     L.append("")
@@ -2363,6 +2601,8 @@ def render_report(r):
     L.append("روش اسکن از شیوه‌های استاندارد تحلیل ایستای iOS پیروی می‌کند: "
              "اسکن باینری MobSF (دسترسی‌ها، امضا، ATS، محافظت‌های باینری، "
              "رمزهای سخت‌کدشده، ترکرها) و دسته‌بندی OWASP MASVS/MASTG.")
+    L.append("- تحلیل ایستا فقط آدرس‌های ثابت در فایل را می‌بیند؛ آدرسی که در "
+             "زمان اجرا ساخته شود، در فایل نیست.")
     cov = r.get("masvs_coverage") or {}
     if cov.get("checked"):
         L.append(f"- دسته‌های MASVS بررسی‌شده: {', '.join(cov['checked'])}")
@@ -2502,7 +2742,8 @@ def render_report(r):
         if bs.get("generic_apis"):
             L.append("- APIهای معمولی iOS (اطلاعاتی — امتیازی ندارند، در هزاران برنامه‌ی سالم هم هستند):")
             for g in bs["generic_apis"]:
-                L.append(f"  - {g['label_fa']} ({g['label_en']}) — {g['matches']} مورد")
+                _note = f" — {g['note']}" if g.get("note") else ""
+                L.append(f"  - {g['label_fa']} ({g['label_en']}) — {g['matches']} مورد{_note}")
     L.append("")
     L.append(f"## کتابخانه‌های داینامیک (.dylib) — {r.get('dylib_count', 0)} مورد")
     if not r.get("dylib_analysis"):
@@ -2533,8 +2774,14 @@ def render_report(r):
             if not d.get("suspicious"):
                 L.append("  - هیچ الگوی مشکوک شناخته‌شده‌ای پیدا نشد.")
             if d.get("generic_apis"):
+                _parts = []
+                for g in d["generic_apis"]:
+                    _p = f"{g['label_fa']} ({g['matches']} مورد)"
+                    if g.get("note"):
+                        _p += f" — {g['note']}"
+                    _parts.append(_p)
                 L.append("  - APIهای معمولی iOS (اطلاعاتی — امتیازی ندارند): "
-                         + "، ".join(f"{g['label_fa']} ({g['matches']} مورد)" for g in d["generic_apis"]))
+                         + "؛ ".join(_parts))
     L.append("")
     L.append(f"## URL Schemes: {', '.join(r.get('url_schemes', [])) or '—'}")
     L.append(f"## دامنه‌ها ({len(r.get('domains',[]))}) و URLها ({r.get('url_count',0)})")
@@ -2590,18 +2837,21 @@ def render_report(r):
     # risk breakdown above; the complete list stays in the JSON.
     if r.get("findings"):
         L.append("## مهم‌ترین یافته‌ها (۵ مورد اول — لیست کامل در JSON است)")
+        L.append("سطح مدرک: «اثبات‌شده» یعنی در فایل دیده شد؛ «قابلیت» یعنی کد/دسترسی هست ولی اجرا یا ارسال آن اثبات نشده؛ «نیاز به بررسی زمان اجرا» یعنی از روی فایل نمی‌شود گفت.")
         sev_fa = {"critical": "بحرانی", "high": "بالا", "medium": "متوسط",
                   "low": "کم", "info": "اطلاعاتی"}
         for f in r["findings"][:5]:
+            _tier = f.get("evidence_tier_fa") or ""
             L.append(f"- [{sev_fa.get(f['severity'], f['severity'])}] {f['title_fa']}"
-                     + (f" (+{f['points']})" if f.get("points") else ""))
+                     + (f" (+{f['points']})" if f.get("points") else "")
+                     + (f" — سطح مدرک: {_tier}" if _tier else ""))
         L.append("")
-    # ---- Scan limits, once, in Persian (v6) ----
+    # ---- Scan limits, once, in Persian (v7: the runtime-traffic scare
+    # line is gone; the one allowed limit sentence lives in the
+    # methodology section above) ----
     L.append("## محدودیت‌های اسکن")
     for lim in r.get("limits", []):
         L.append(f"- {lim}")
-    L.append("- ترافیک واقعی شبکه و رفتار زمان اجرا با اسکن ایستا دیده نمی‌شود؛ "
-             "برای اثبات ارسال داده، رصد ترافیک لازم است.")
     if r.get("binary", {}).get("encrypted") is True:
         L.append("- ⚠️ این IPA رمزگذاری‌شده است (FairPlay). تحلیل رشته‌ها و الگوهای API باینری بدون IPA رمزگشایی‌شده ممکن نیست.")
     if r.get("warnings"):
@@ -2617,7 +2867,7 @@ def render_report(r):
     return "\n".join(L) + "\n"
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="SibStar IPA scanner v6 (deep scan)")
+    ap = argparse.ArgumentParser(description="SibStar IPA scanner v7 (deep scan)")
     ap.add_argument("ipa", help="Path to .ipa file")
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument("--report", dest="report_out", default=None)
