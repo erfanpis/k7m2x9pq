@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SibStar IPA Scanner — Telegram bot v3 (Telethon / MTProto).
+SibStar IPA Scanner — Telegram bot v4 (Telethon / MTProto).
 
 Send the bot a .ipa file, or a direct http(s) link to an .ipa file, and it
 scans it and replies in Persian with a short summary + the full report (.md)
@@ -203,13 +203,24 @@ def check_disk_space(directory, needed_bytes):
 
 
 def build_summary(r):
-    """The short Persian summary the bot sends as a chat message."""
+    """The short Persian summary the bot sends as a chat message.
+
+    First lines first: the tampering verdict, then the (calm, capped)
+    risk with its original/tweak split. No alarmist wording.
+    """
     ident = r.get("identity", {})
     risk = r.get("risk", {})
     name = ident.get("display_name") or "برنامه"
-    lines = [f"🔍 اسکن {name} تمام شد",
-             f"📦 {ident.get('bundle_id') or '—'} — نسخه {ident.get('version') or '—'} (حداقل iOS {ident.get('minimum_os') or '—'})",
-             f"⚠️ ریسک: {risk.get('score', '?')}/100 — {risk.get('level_fa', '')}"]
+    tamp = r.get("tampering") or {}
+    lines = [f"🔍 اسکن {name} تمام شد"]
+    if tamp.get("tampered"):
+        lines.append(f"🛠 دستکاری شخص ثالث: بله — {tamp.get('injected_dylib_count', 0)} "
+                     "dylib تزریقی (MobileSubstrate)")
+    else:
+        lines.append("🛠 دستکاری شخص ثالث: پیدا نشد")
+    lines.append(f"📦 {ident.get('bundle_id') or '—'} — نسخه {ident.get('version') or '—'} (حداقل iOS {ident.get('minimum_os') or '—'})")
+    lines.append(f"📊 ریسک: {risk.get('score', '?')}/100 — {risk.get('level_fa', '')} "
+                 f"(برنامه‌ی اصلی: {risk.get('original_points', '?')}، توئیک: {risk.get('tweak_points', '?')})")
     if r.get("binary", {}).get("encrypted") is True:
         lines.append("🔒 باینری رمزگذاری‌شده (FairPlay) است — تحلیل رشته‌های باینری انجام نشد.")
     perms = r.get("permissions", [])
@@ -223,11 +234,17 @@ def build_summary(r):
     lines.append(f"🌐 دامنه‌ها: {len(r.get('domains', []))} — لینک ناامن http: {len(http_urls)}")
     if r.get("dylib_count"):
         lines.append(f"📚 فایل‌های dylib: {r['dylib_count']} — الگوی مشکوک در dylib: {r.get('dylib_suspicious_count', 0)}")
+    if r.get("deb_count"):
+        lines.append(f"📦 بسته‌های .deb: {r['deb_count']}" +
+                     (f" (توئیک: {len(r.get('tampering', {}).get('tweak_deb_packages', []))})" if r.get("tampering", {}).get("tweak_deb_packages") else ""))
+    if r.get("hardcoded_secrets"):
+        lines.append(f"🔑 رمز سخت‌کدشده: {len(r['hardcoded_secrets'])} مورد")
     answers = {a["id"]: a for a in (r.get("privacy_answers", []) or [])}
     if answers:
         lines.append("")
         lines.append("🔐 حریم خصوصی:")
-        for qid, label in (("sends_photos_to_server", "ارسال عکس به سرور"),
+        for qid, label in (("tampering", "دستکاری شخص ثالث"),
+                            ("sends_photos_to_server", "ارسال عکس به سرور"),
                             ("third_party_can_see_photos", "دسترسی شخص ثالث به عکس"),
                             ("collects_photo_info", "جمع‌آوری اطلاعات عکس"),
                             ("verdict", "حکم نهایی")):
@@ -261,6 +278,8 @@ HELP_FA = (
     "🔗 یا لینک مستقیم یک فایل .ipa بده تا دانلود و اسکنش کنم.\n"
     "🖼 بعد از اسکن، یک کارت تصویری خلاصه هم می‌فرستم.\n"
     "🗑 فایل IPA بعد از اسکن و ارسال گزارش حذف می‌شود؛ چیزی ذخیره نمی‌شود.\n"
+    "⏳ در طول اسکن یک پیام پیشرفت با ۶ مرحله می‌بینی: دانلود، استخراج، "
+    "اسکن باینری، آنالیز dylib و deb، ساخت گزارش، ارسال و پاک کردن.\n"
     "🔒 IPAهای اپ‌استور رمزگذاری‌شده‌اند؛ تحلیل کامل باینری‌شان بدون نسخه‌ی رمزگشایی‌شده ممکن نیست.\n\n"
     "دستورها: /start و /help"
 )
@@ -269,6 +288,47 @@ ACCESS_DENIED_FA = "⛔ این ربات فقط برای صاحبش است و ب�
 
 
 # ---------------------------------------------------------------- progress
+
+# The six scan stages, shown in ONE progress message that is edited as
+# the scan moves on — the user always sees exactly which stage the bot
+# is in, instead of a vague "please wait".
+STAGES = [
+    (1, "دانلود"),
+    (2, "استخراج"),
+    (3, "اسکن باینری اصلی"),
+    (4, "آنالیز dylib و deb"),
+    (5, "ساخت کارت و گزارش"),
+    (6, "ارسال و پاک کردن"),
+]
+
+
+def stage_text(stage, detail=""):
+    """One-line progress text, e.g. 'مرحله 3/6 — اسکن باینری اصلی'."""
+    name = STAGES[stage - 1][1] if 1 <= stage <= len(STAGES) else ""
+    text = f"⏳ مرحله {stage}/6 — {name}"
+    if detail:
+        text += f" — {detail}"
+    return text
+
+
+async def set_stage(prog_msg, stage, detail=""):
+    """Edit the single progress message to a stage. Safe if prog_msg is None."""
+    if prog_msg is None:
+        return
+    try:
+        await prog_msg.edit(stage_text(stage, detail))
+    except Exception:
+        pass
+
+
+async def finish_progress(prog_msg):
+    if prog_msg is None:
+        return
+    try:
+        await prog_msg.edit("✅ اسکن تمام شد — گزارش ارسال شد و فایل IPA حذف شد.")
+    except Exception:
+        pass
+
 
 class ProgressTracker:
     """Thread-safe download progress. Records the next 10% mark to report."""
@@ -311,7 +371,7 @@ async def progress_watcher(tracker, prog_msg, label):
             pct = tracker.take_pending()
             if pct is not None and prog_msg is not None:
                 try:
-                    await prog_msg.edit(f"⬇️ در حال دانلود {label}… {pct}٪")
+                    await prog_msg.edit(stage_text(1, f"دانلود {label}… {pct}٪"))
                 except Exception:
                     pass
     except asyncio.CancelledError:
@@ -437,12 +497,11 @@ class ScannerBot:
                              "برای اسکن، یک فایل .ipa بفرست یا لینک مستقیم یک فایل .ipa بده. راهنما: /help")
 
     async def scan_telegram_file(self, event, file_name, file_size):
-        await self.reply(event, "⏳ دارم دانلود و اسکن می‌کنم… چند لحظه صبر کن.")
-        prog_msg = None
+        # ONE progress message for the whole scan; it is edited stage by stage.
+        prog_msg = await event.reply(stage_text(1, "دانلود…"))
         tracker = None
         if file_size and file_size > PROGRESS_MIN_BYTES:
             tracker = ProgressTracker(file_size)
-            prog_msg = await event.reply(f"⬇️ در حال دانلود… 0٪")
             watcher = asyncio.create_task(progress_watcher(tracker, prog_msg, file_name))
         else:
             watcher = None
@@ -475,7 +534,8 @@ class ScannerBot:
                 if not check_ipa_magic(ipa_path):
                     await self.reply(event, "فایل دانلودشده یک IPA معتبر نیست.")
                     return
-                await self.scan_and_report(event, ipa_path, file_name, tmpdir)
+                await set_stage(prog_msg, 2, "استخراج فایل IPA")
+                await self.scan_and_report(event, ipa_path, file_name, tmpdir, prog_msg)
                 # Explicit delete of the IPA right after the reports were sent;
                 # the temp dir itself is removed by the context manager below.
                 ipa_path.unlink(missing_ok=True)
@@ -486,9 +546,8 @@ class ScannerBot:
                 watcher.cancel()
 
     async def scan_url(self, event, url):
-        await self.reply(event, "⏳ دارم لینک رو دانلود و اسکن می‌کنم… چند لحظه صبر کن.")
+        prog_msg = await event.reply(stage_text(1, "دانلود لینک…"))
         tracker = ProgressTracker()
-        prog_msg = await event.reply("⬇️ در حال دانلود لینک…")
         watcher = asyncio.create_task(progress_watcher(tracker, prog_msg, "لینک"))
         file_name = Path(urllib.parse.urlparse(url).path).name or "app.ipa"
         try:
@@ -514,19 +573,21 @@ class ScannerBot:
                 if disk_err:
                     await self.reply(event, disk_err)
                     return
-                await self.scan_and_report(event, ipa_path, file_name, tmpdir)
+                await set_stage(prog_msg, 2, "استخراج فایل IPA")
+                await self.scan_and_report(event, ipa_path, file_name, tmpdir, prog_msg)
                 ipa_path.unlink(missing_ok=True)
         finally:
             tracker.finish()
             watcher.cancel()
 
-    async def scan_and_report(self, event, ipa_path, file_name, tmpdir):
+    async def scan_and_report(self, event, ipa_path, file_name, tmpdir, prog_msg=None):
         """Scan an IPA already on disk and send the Persian summary + reports.
 
         Caller owns the temp dir; the IPA and reports are deleted by the
-        caller/context manager after this returns.
+        caller/context manager after this returns. The single progress
+        message moves through stages 3-6 here.
         """
-        await event.reply("🔍 دانلود کامل شد، دارم اسکن می‌کنم…")
+        await set_stage(prog_msg, 3)
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(
@@ -534,6 +595,10 @@ class ScannerBot:
         except Exception as e:
             await self.reply(event, f"اسکن ناموفق بود: {e}")
             return
+        await set_stage(prog_msg, 4,
+                        f"{result.get('dylib_count', 0)} dylib و "
+                        f"{result.get('deb_count', 0)} بسته deb")
+        await set_stage(prog_msg, 5)
         report_md = render_report(result)
         report_json = json.dumps(result, ensure_ascii=False, indent=2)
         base = Path(file_name).stem or "app"
@@ -551,6 +616,7 @@ class ScannerBot:
         except Exception as e:
             print(f"report card skipped: {e}", file=sys.stderr)
             card_path = None
+        await set_stage(prog_msg, 6)
         try:
             await event.reply(build_summary(result))
             if card_path is not None and card_path.is_file():
@@ -571,6 +637,7 @@ class ScannerBot:
             json_path.unlink(missing_ok=True)
             if card_path is not None:
                 card_path.unlink(missing_ok=True)
+        await finish_progress(prog_msg)
 
 
 # ---------------------------------------------------------------- CLI

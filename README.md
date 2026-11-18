@@ -1,4 +1,4 @@
-# اسکنر IPA + ربات تلگرام — سیب‌استار (نسخه ۳)
+# اسکنر IPA + ربات تلگرام — سیب‌استار (نسخه ۴)
 
 [English summary below](#english-summary)
 
@@ -7,8 +7,59 @@
 اسکن می‌کند و به فارسی گزارش می‌دهد: خلاصه کوتاه در چت + **کارت تصویری خلاصه (PNG)**
 + گزارش کامل (`.md`) و داده (`‌.json`) به‌صورت فایل ضمیمه.
 
-**نسخه ۳ با MTProto کار می‌کند (Telethon، مثل لینک‌یار) و فایل تا ۲ گیگابایت را
+**نسخه ۴ با MTProto کار می‌کند (Telethon، مثل لینک‌یار) و فایل تا ۲ گیگابایت را
 می‌گیرد** — نسخه ۲ با Bot API فقط تا ۲۰ مگابایت می‌گرفت.
+
+## نسخه ۴ — چه چیزی نسبت به نسخه ۳ بهتر شد؟
+
+نسخه ۳ روی یک IPA واقعی (PDF Hero، نسخه‌ی مادشده) تست شد و دو مشکل بزرگ داشت:
+امتیاز ریسک با مثبت‌های کاذب (URLهای فضای نام XML و دامنه‌های مستندات) تا ۱۰۰/۱۰۰
+باد کرده بود، و کارت PNG خراب رندر می‌شد. نسخه ۴ هر دو را اصلاح می‌کند:
+
+| بخش | نسخه ۳ | نسخه ۴ |
+|---|---|---|
+| URLهای فضای نام XML/XMP/SVG و دامنه‌های مستندات (w3.org، ns.adobe.com، github.com، t.me و…) | به‌عنوان دامنه‌ی شبکه و http ناامن شمرده می‌شدند و امتیاز می‌دادند | ✅ جدا می‌شوند، در بخش «رشته‌های URL نادیده‌گرفته‌شده» می‌آیند و **هیچ امتیازی نمی‌گیرند** |
+| امتیاز ریسک | بدون سقف دسته‌بندی؛ IPA تست ۱۰۰/۱۰۰ می‌شد | ✅ سقف هر دسته: شبکه ۲۰، دسترسی ۱۵، حریم خصوصی ۱۵، کد ۱۲، توئیک ۲۵ (حداکثر ممکن ۸۷)؛ دسترسی «موقعیت» فقط یک بار (قوی‌ترین کلید) شمرده می‌شود؛ داده‌های مانیفست فقط وقتی امتیاز می‌گیرند که به هویت لینک شده باشند یا برای ردیابی استفاده شوند |
+| دستکاری شخص ثالث / توئیک | فقط dylibها لیست می‌شدند | ✅ بخش اختصاصی با حکم «بله/خیر» + مدرک: dylibهای تزریقی (مسیر MobileSubstrate)، دامنه‌ی هر dylib جداگانه، و سرور ناشناخته‌ی توئیک؛ اگر سروری پیدا نشد، صریحاً گفته می‌شود و محدودیت تحلیل ایستا هم گفته می‌شود |
+| بسته‌های `.deb` | ❌ | ✅ جداگانه استخراج و تحلیل می‌شوند: متادیتای control، نام/نسخه/نگهدارنده، فایل‌های داخل (MobileSubstrate؟)، اسکریپت‌های pre/post-install |
+| ریسک برنامه‌ی اصلی در برابر توئیک | یک عدد کلی | ✅ جدا: «برنامه‌ی اصلی: X، توئیک: Y» در خلاصه، کارت و گزارش |
+| هش باینری و محافظت‌ها | ❌ | ✅ SHA-256 + MD5 + SHA-1 فایل؛ PIE، stack canary و ARC باینری اصلی |
+| رمزها و توکن‌های سخت‌کدشده | ❌ | ✅ فقط الگوهای شناخته‌شده (AWS، GitHub، Slack، Stripe، کلید خصوصی)؛ مقدار کامل هرگز ذخیره یا چاپ نمی‌شود، فقط نوع + منبع + پیش‌نمایش ماسک‌شده |
+| رمزنگاری ضعیف | ❌ | ✅ MD5، SHA1، DES، ECB (اطمینان پایین — فقط نشانه، نه اثبات استفاده) |
+| خانواده‌ی ران‌تایم | ❌ | ✅ Flutter / Unity / React Native / Cordova / Xamarin / بومی — چون منطق برنامه در آن‌ها جای دیگری است |
+| افزونه‌های برنامه (`.appex`) | ❌ | ✅ هر appex جداگانه: Bundle ID، دسترسی‌ها، امضای کد و provisioning |
+| نشانه‌های جیلبریک | ❌ | ✅ مسیرهای MobileSubstrate، Cydia و ابزارهای تزریق در رشته‌های باینری و dylibها |
+| هر یافته | شدت | ✅ + نگاشت به **OWASP MASVS** و سطح اطمینان (بالا/متوسط/پایین)؛ بخش «روش‌شناسی و استانداردها» در گزارش |
+| پیام‌های ربات | چند پیام جدا | ✅ **یک پیام پیشرفت با ۶ مرحله‌ی شماره‌دار** (۱/۶ دانلود با درصد، ۲/۶ استخراج، ۳/۶ اسکن باینری، ۴/۶ آنالیز dylib و deb، ۵/۶ ساخت کارت و گزارش، ۶/۶ ارسال و پاک کردن) |
+| پاسخ‌های حریم خصوصی | ۴ سؤال | ✅ **۵ سؤال** — سؤال دستکاری شخص ثالث اول می‌آید، با حکم قاطع و مدرک |
+| کارت PNG | رندر خراب، قرمز همه‌جا | ✅ بازطراحی کامل: طرح تمیز، رنگ آرام (فقط دایره‌ی امتیاز رنگی است)، بنر نرم دستکاری، حکم به زبان ساده |
+
+### روش‌شناسی و استانداردها
+
+اسکن ایستا نسخه ۴ از روش‌های استاندارد حرفه‌ای یاد گرفته است (فقط روش‌ها را
+یاد گرفته‌ایم، متن کپی نشده است):
+
+- **MobSF (Mobile Security Framework)** — اسکن باینری iOS: دسترسی‌ها، گواهی
+  امضا، تنظیمات ATS، محافظت‌های باینری (PIE، NX، stack canary، ARC)، رمزهای
+  سخت‌کدشده در plist/رشته‌ها، قوانین SAST برای رمزنگاری ضعیف، و فهرست ترکرها؛
+  یافته‌ها با شدت و نگاشت CWE/OWASP گزارش می‌شوند.
+- **OWASP MASVS / MASTG** — دسته‌های STORAGE، CRYPTO، AUTH، NETWORK، PLATFORM،
+  CODE، RESILIENCE و PRIVACY؛ هر یافته به یک کنترل MASVS نگاشت می‌شود و سطح
+  اطمینان دارد. OWASP صریحاً می‌گوید ابزار خودکار راهنماست، نه حکم قطعی، و
+  خروجی می‌تواند مثبت کاذب و منفی کاذب داشته باشد — گزارش ما هم همین را می‌گوید.
+- **بهترین روش‌های تحلیل ایستای IPA** — اول هش فایل، بعد هویت/امضا/entitlements،
+  بعد بررسی وضعیت رمزگذاری (cryptid) قبل از هر خواندن عمیق‌تر؛ مقایسه‌ی
+  مجوزهای provisioning با ادعاهای entitlement؛ بررسی جداگانه‌ی هر `.appex`
+  (هر کدام پروسه و entitlement خودش را دارد)؛ تشخیص خانواده‌ی ران‌تایم از
+  فریم‌ورک‌ها.
+- **تشخیص توئیک/جیلبریک** — شمارش کتابخانه‌های لودشده با dyld و مقایسه با
+  مجموعه‌ی مجاز؛ مسیرهای `/Library/MobileSubstrate/`، Cydia، apt و dylibهای
+  تزریقی مثل FridaGadget/CydiaSubstrate.
+
+منابع: [MobSF iOS static analysis](https://deepwiki.com/MobSF/Mobile-Security-Framework-MobSF/5.2-ios-static-analysis) ·
+[OWASP MASVS](https://mas.owasp.org/MASVS/) ·
+[OWASP MASTG](https://mas.owasp.org/MASTG/) ·
+[OWASP MASVS — iOS app security checklist](https://github.com/OWASP/owasp-masvs)
 
 ## اسکن عمیق نسخه ۳ — چه چیزی بیشتر از نسخه ۲ چک می‌شود؟
 
@@ -28,10 +79,16 @@
 | شدت یافته‌ها | فقط امتیاز | ✅ هر یافته یک شدت دارد: بحرانی / بالا / متوسط / کم / اطلاعاتی |
 | پاسخ به سؤال‌های حریم خصوصی | ❌ | ✅ چهار سؤال مستقیم با مدرک و محدودیت صادقانه (پایین ببینید) |
 
-## پاسخ به چهار سؤال حریم خصوصی
+## پاسخ به پنج سؤال حریم خصوصی
 
-گزارش نهایی (`.md`)، خلاصه چت و کارت تصویری مستقیماً به این چهار سؤال جواب می‌دهند:
+گزارش نهایی (`.md`)، خلاصه چت و کارت تصویری مستقیماً به این پنج سؤال جواب می‌دهند
+(سؤال دستکاری اول است — مهم‌ترین سؤال کاربر):
 
+0. **آیا این نسخه (توئیک) غیر از شرکت اصلی، توسط شخص ثالث دستکاری شده تا داده
+   به خودش برسد؟** — بر اساس dylibهای تزریقی (MobileSubstrate)، بسته‌های `.deb`،
+   و دامنه‌ی هر dylib جداگانه. اگر توئیک به سرور ناشناخته‌ای وصل شود، نام سرور
+   گفته می‌شود؛ اگر نشود، صریحاً گفته می‌شود و محدودیت تحلیل ایستا (ترافیک واقعی
+   زمان اجرا دیده نمی‌شود) هم گفته می‌شود.
 1. **آیا برنامه عکس‌ها/فایل‌ها را به سرور یا فضای ابری می‌فرستد؟** — بر اساس دسترسی
    گالری، حالت‌های پس‌زمینه، دامنه‌های شبکه و ATS؛ با لیست سرورهایی که برنامه با آن‌ها
    حرف می‌زند. تحلیل ایستا فقط «توانایی» و «آدرس سرورها» را نشان می‌دهد، نه ترافیک واقعی.
@@ -43,7 +100,9 @@
    (مخصوصاً برای IPAهای رمزگذاری‌شده با FairPlay که تحلیل باینری‌شان ممکن نیست.)
 
 هر جواب یک کلمه‌ی حکم کوتاه، مدارک و «محدودیت صادقانه» دارد — جایی که مدرک نیست،
-گزارش صریحاً می‌گوید قابل بررسی نیست، نه اینکه چیزی جعل کند.
+گزارش صریحاً می‌گوید قابل بررسی نیست، نه اینکه چیزی جعل کند. جواب‌ها قاطع‌اند
+(«بله» با مدرک)، نه «ممکن است» همه‌جا؛ حکم نهایی هم آرام است («با احتیاط استفاده
+کنید»)، نه ترسناک.
 
 ## محدودیت مهم — FairPlay
 
@@ -58,12 +117,14 @@ FairPlay ادعا نمی‌کند و ندارد.
 ## کارت خلاصه‌ی تصویری (PNG)
 
 بعد از هر اسکن، یک کارت PNG تمیز ساخته می‌شود (`report_card.py` با Pillow):
-نام برنامه، Bundle ID، نسخه، امتیاز ریسک ۰ تا ۱۰۰ با رنگ مشخص (سبز/کهربایی/قرمز)،
-سطح ریسک به فارسی، حکم نهایی، پاسخ کوتاه چهار سؤال حریم خصوصی، شمارنده‌ها
-(دسترسی‌ها، ترکرها، دامنه‌ها، لینک ناامن، فایل dylib، الگوی مشکوک) و مهم‌ترین
-یافته‌ها. متن فارسی راست‌چین و با شکل‌دهی درست حروف رندر می‌شود (raqm در
-Pillow، و در غیاب آن arabic-reshaper + python-bidi). کارت هم در تلگرام به‌صورت
-عکس فرستاده می‌شود.
+نام برنامه، Bundle ID، نسخه، امتیاز ریسک ۰ تا ۱۰۰ با رنگ آرام (سبز/کهربایی/قرمز
+ملایم — فقط دایره‌ی امتیاز رنگی است، نه کل کارت)، سطح ریسک به فارسی، بنر نرم
+دستکاری شخص ثالث، جدا بودن ریسک برنامه‌ی اصلی و توئیک، حکم نهایی به زبان ساده،
+پاسخ کوتاه پنج سؤال حریم خصوصی، شمارنده‌ها (دسترسی‌ها، ترکرها، دامنه‌های واقعی،
+لینک ناامن، فایل dylib، بسته `.deb`) و مهم‌ترین یافته‌ها. متن فارسی راست‌چین و
+با شکل‌دهی درست حروف رندر می‌شود (raqm در Pillow، و در غیاب آن arabic-reshaper
++ python-bidi). کارت هم در تلگرام به‌صورت عکس فرستاده می‌شود. اندازه‌ی کارت
+۱۲۰۰×۱۳۲۰ است و رندر آن با چشم در تست بررسی شده است (بدون هم‌پوشانی و بریدگی متن).
 
 ## پاک‌سازی — فایل‌ها ذخیره نمی‌شوند
 
@@ -83,7 +144,7 @@ python3 scanner.py app.ipa --json report.json --report report.md
 # ۲) کارت تصویری خلاصه
 python3 report_card.py app.ipa --out card.png
 
-# ۳) ربات تلگرام — نسخه ۳ به Telethon نیاز دارد (MTProto، برای ۲ گیگابایت)
+# ۳) ربات تلگرام — نسخه ۴ به Telethon نیاز دارد (MTProto، برای ۲ گیگابایت)
 pip install -r requirements.txt
 export TELEGRAM_BOT_TOKEN='توکن-از-BotFather'
 export TELEGRAM_API_ID='123456'        # از https://my.telegram.org
@@ -101,21 +162,23 @@ python3 test/test_scanner_v3.py
 
 در تلگرام: فایل `.ipa` را برای ربات بفرستید، یا لینک مستقیم یک فایل `.ipa` بدهید.
 حداکثر حجم فایل **۲ گیگابایت** است (محدودیت تلگرام)؛ فایل بزرگ‌تر یا غیر IPA با
-پیام فارسی رد می‌شود. برای فایل‌های بالای ۵۰ مگابایت، پیشرفت دانلود هر ۱۰٪
-گزارش می‌شود. دستورها: `/start` و `/help`. فقط ادمین (ADMIN_USER_IDS) می‌تواند
+پیام فارسی رد می‌شود. ربات **یک پیام پیشرفت** نشان می‌دهد که در ۶ مرحله حرکت
+می‌کند (۱/۶ دانلود با درصد، ۲/۶ استخراج، ۳/۶ اسکن باینری، ۴/۶ آنالیز dylib و deb،
+۵/۶ ساخت کارت و گزارش، ۶/۶ ارسال و پاک کردن)؛ پیام نهایی با حکم دستکاری و ریسک
+شروع می‌شود. دستورها: `/start` و `/help`. فقط ادمین (ADMIN_USER_IDS) می‌تواند
 از ربات استفاده کند؛ بقیه با پیام فارسی رد می‌شوند.
 
 ## ساختار ریپو
 
 ```
-scanner.py                  # اسکنر عمیق نسخه ۳ (فقط stdlib)
-bot.py                      # ربات تلگرام نسخه ۳ (Telethon / MTProto)
+scanner.py                  # اسکنر عمیق نسخه ۴ (فقط stdlib)
+bot.py                      # ربات تلگرام نسخه ۴ (Telethon / MTProto)
 report_card.py              # کارت تصویری خلاصه PNG (Pillow)
 requirements.txt            # telethon, Pillow, arabic-reshaper, python-bidi
 test/
-  make_test_ipa_v2.py       # ساخت IPA مصنوعی تست (با ۲ فایل dylib: یکی سالم، یکی رمزگذاری‌شده)
-  test_bot_offline.py       # تست آفلاین ربات نسخه ۳ (بدون توکن، بدون شبکه)
-  test_scanner_v3.py        # تست اسکنر نسخه ۳ + کارت PNG
+  make_test_ipa_v2.py       # ساخت IPA مصنوعی تست (با ۳ فایل dylib: سالم، رمزگذاری‌شده، توئیک MobileSubstrate + یک .deb توئیک + appex + Flutter)
+  test_bot_offline.py       # تست آفلاین ربات نسخه ۴ (بدون توکن، بدون شبکه)
+  test_scanner_v3.py        # تست اسکنر نسخه ۴ + کارت PNG
   TestGame.ipa              # IPA تست (رمزگذاری‌نشده)
   TestGame-encrypted.ipa    # همان IPA با cryptid=1
   report-v2.json / .md       # خروجی تست
@@ -129,24 +192,28 @@ README.md / DEPLOY.md / LICENSE / .gitignore
 IPA مصنوعی تست (نه برنامه‌ی واقعی اپ‌استور) با `test/make_test_ipa_v2.py` ساخته و اسکن شد:
 
 - برنامه: TestGame — `com.example.testgame`، نسخه 1.2.3، حداقل iOS 15.0 (از باینری: 16.0.0)، SDK iphoneos17.5، Xcode 15.4
-- **ریسک: 100/100 — بالا**
+- **ریسک: 87/100 — بالا** (برنامه‌ی اصلی: ۶۲، توئیک: ۲۵ — حداکثر ممکن با سقف‌های نسخه ۴، ۸۷ است؛ دیگر ۱۰۰/۱۰۰ الکی نمی‌شود)
 - دسترسی‌ها (۱۱): دوربین، میکروفون، موقعیت همیشه، مخاطبین، گالری، بلوتوث، سلامت، تشخیص گفتار، Face ID، شبکه محلی، ردیابی ATT
 - مانیفست حریم خصوصی: ردیابی = بله، ۲ دامنه‌ی ردیابی، ۳ نوع داده (موقعیت دقیق حساس علامت خورد)
 - ترکرها (۷): Firebase، AppsFlyer، Amplitude، Flurry، Mixpanel، Sentry، Segment
-- باینری: Mach-O ۶۴ بیتی arm64، رمزگذاری‌نشده، UUID و ۲ کتابخانه‌ی لینک‌شده، ۸ الگوی مشکوک (IDFA، لوکیشن، مخاطبین، کلیپ‌بورد، `dlopen` و…)
-- فایل‌های dylib (۲): `libTest.dylib` — ۳ الگوی مشکوک، ریسک ۱۸؛ `libLocked.dylib` — رمزگذاری‌شده، تحلیل رشته‌ها در دسترس نیست
-- دامنه‌ها: ۷ — URL ناامن `http://`: ۳ (شامل یکی از dylib)
-- پاسخ‌ها: ارسال عکس به سرور «ممکن است»، دسترسی شخص ثالث «ممکن است»، جمع‌آوری اطلاعات عکس «احتمالاً»، حکم نهایی «پرخطر»
+- باینری: Mach-O ۶۴ بیتی arm64، رمزگذاری‌نشده، PIE/stack canary/ARC فعال، UUID و ۲ کتابخانه‌ی لینک‌شده، ۸ الگوی مشکوک (IDFA، لوکیشن، مخاطبین، کلیپ‌بورد، `dlopen` و…)، ۲ رمز سخت‌کدشده (فقط نوع‌شان گزارش می‌شود، نه مقدار)، MD5 ضعیف
+- فایل‌های dylib (۳): `libTest.dylib` — ۳ الگوی مشکوک، ریسک ۱۸؛ `libLocked.dylib` — رمزگذاری‌شده، تحلیل رشته‌ها در دسترس نیست؛ `libTweak.dylib` — **تزریقی (MobileSubstrate)** با سرور ناشناخته‌ی خودش `tweak-evil.example.com`
+- بسته‌ی `.deb` (۱): `com.example.testtweak` نسخه ۱٫۰ — بسته‌ی توئیک با فایل‌های MobileSubstrate و اسکریپت postinst
+- دامنه‌ها: ۷ — URL ناامن `http://`: ۳ (شامل یکی از dylib)؛ ۹ دامنه‌ی فضای نام/مستندات (w3.org، ns.adobe.com، github.com، t.me و…) نادیده گرفته شدند و هیچ امتیازی ندادند
+- پاسخ‌ها: دستکاری شخص ثالث «بله — تأیید شد»، ارسال عکس به سرور «بله»، دسترسی شخص ثالث «بله — توئیک به سرور ناشناخته‌ی خودش وصل می‌شود»، جمع‌آوری اطلاعات عکس «احتمالاً»، حکم نهایی «بالا — دستکاری شخص ثالث تأیید شد؛ با احتیاط استفاده کنید»
+- خانواده‌ی ران‌تایم: Flutter؛ افزونه: TestWidget.appex با دسترسی دوربین
 
 نسخه‌ی رمزگذاری‌شده هم تست شد: اسکنر درست تشخیص داد `encrypted=True, cryptid=1`،
-تحلیل رشته‌ها را «در دسترس نیست» اعلام کرد، حکم نهایی «بررسی ناقص» شد، و dylib
-رمزگذاری‌شده هم جداگانه «در دسترس نیست» گزارش شد.
+تحلیل رشته‌ها را «در دسترس نیست» اعلام کرد، و چون دستکاری توئیک (dylib/.deb)
+رمزگذاری نشده و هنوز قابل تأیید بود، حکم نهایی «بالا» ماند و محدودیت FairPlay
+در بخش «قابل بررسی نیست» گزارش آمد.
 
 ربات هم آفلاین تست شد: `/start` راهنمای فارسی را می‌دهد، فایل غیر IPA رد می‌شود،
 فایل بالای ۲ گیگابایت با پیام حد تلگرام رد می‌شود، لینک غیر http(s) و لینک غیر IPA
-رد می‌شود، دانلود لینک از سرور محلی کار می‌کند، و خلاصه‌ی فارسی همان ریسک 100/100
-را با چهار پاسخ حریم خصوصی و تعداد dylib برمی‌گرداند. کارت PNG هم برای هر دو
-نسخه‌ی IPA ساخته و اعتبارسنجی شد (1200×1180).
+رد می‌شود، دانلود لینک از سرور محلی کار می‌کند، و خلاصه‌ی فارسی همان ریسک 87/100
+را با حکم دستکاری در خط اول، پنج پاسخ حریم خصوصی و تعداد dylib و `.deb` برمی‌گرداند.
+یک پیام پیشرفت در ۶ مرحله ویرایش می‌شود و در پایان «اسکن تمام شد» می‌نویسد. کارت PNG
+هم برای هر دو نسخه‌ی IPA ساخته و اعتبارسنجی شد (1200×1320) و رندرش با چشم بررسی شد.
 
 ## گیت‌هاب
 
@@ -165,18 +232,29 @@ IPA مصنوعی تست (نه برنامه‌ی واقعی اپ‌استور) ب
 
 ## <a name="english-summary"></a>English summary
 
-A Telegram bot + deep IPA scanner for SibStar (Persian iOS App Store), v3.
+A Telegram bot + deep IPA scanner for SibStar (Persian iOS App Store), v4.
 Send an `.ipa` file or a direct `.ipa` link; it replies in Persian with a risk
 score (0–100) summary, a PNG summary card, plus full Markdown/JSON reports.
-v3 uses Telethon (MTProto, like LinkYar) so files up to 2 GB work (v2's Bot API
-limit was 20 MB). v3 scan adds: SDK/build info, plist security (background
+v4 uses Telethon (MTProto, like LinkYar) so files up to 2 GB work (v2's Bot API
+limit was 20 MB). v4 scan adds: SDK/build info, plist security (background
 modes, file sharing, Bonjour), per-data-type privacy-manifest risk, 65+
 tracker SDKs (incl. static libs), 33 suspicious binary patterns, per-domain
 risk, per-entitlement severity, provisioning type/expiry, ATS exception
 details, per-framework details, per-dylib analysis (encrypted dylibs reported
-as unavailable, never silently skipped), per-finding severity, and four
-Picsart-style privacy answers with evidence and honest limits. Downloaded
-IPAs and generated reports live only in a temp dir and are deleted right
-after the scan/report, even on failure. FairPlay-encrypted App Store IPAs are
-detected (`cryptid=1`) and the binary-string section is honestly reported as
-unavailable — no FairPlay bypass is claimed or implemented.
+as unavailable, never silently skipped), per-finding severity, and five
+Picsart-style privacy answers with evidence and honest limits. v4 fixes the
+v3 false positives (XML/XMP/SVG namespace URLs and docs domains are ignored
+and never scored), recalibrates risk with per-category caps (network 20,
+permissions 15, privacy 15, code 12, tweak 25; max possible 87), adds a
+dedicated third-party-tampering verdict (MobileSubstrate dylib detection,
+per-dylib domains, unknown tweak servers), `.deb` tweak-package analysis,
+binary protections (PIE/stack canary/ARC), hardcoded-secret and weak-crypto
+detection (values never stored), runtime-family and app-extension analysis,
+jailbreak-artifact detection, and MASVS mapping with confidence per finding
+(methods learned from MobSF and OWASP MASVS/MASTG). The bot shows one
+numbered 6-stage progress message; the redesigned PNG card (1200×1320) is
+calm and was visually checked. Downloaded IPAs and generated reports live
+only in a temp dir and are deleted right after the scan/report, even on
+failure. FairPlay-encrypted App Store IPAs are detected (`cryptid=1`) and
+the binary-string section is honestly reported as unavailable — no FairPlay
+bypass is claimed or implemented.

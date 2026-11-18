@@ -1,30 +1,53 @@
 #!/usr/bin/env python3
 """
-SibStar IPA Scanner v3 — deep scan (stdlib only, no paid dependencies)
+SibStar IPA Scanner v4 — deep scan (stdlib only, no paid dependencies)
 Scans an iOS .ipa (ZIP containing Payload/*.app) WITHOUT decryption:
 
-  v3 vs v2:
-  - More Info.plist coverage: background modes, file sharing, Bonjour
-    services, required device capabilities, SDK/Xcode build info (DT* keys)
-  - Privacy manifest: per-data-type risk (sensitive types flagged),
-    cross-check of tracking domains against the domains found in the bundle
-  - Tracker SDK list expanded (60+), also matched against static libs (.a)
-    and .bundle names, not only .framework/.dylib names
-  - Suspicious binary patterns expanded (30): HealthKit, PhotoKit,
-    Bluetooth, NFC, Face ID, speech, motion, anti-debug (ptrace), process
-    spawning, runtime introspection, network-interface enumeration
-  - URL/domain analysis with per-domain risk: http-only, IP-literal hosts,
-    known tracker/ad domains, manifest tracking domains
-  - Entitlements analysed per key with severity (get-task-allow, push,
-    associated domains, HealthKit, HomeKit, NFC, multicast, VPN, …)
-  - Provisioning profile: type (development/distribution/enterprise),
-    expiry check, team, app ID
-  - ATS: per-exception-domain details (insecure loads, forward secrecy,
-    minimum TLS, subdomains)
-  - Embedded frameworks: per-framework bundle ID, version, size, own
-    PrivacyInfo.xcprivacy
-  - Every finding now carries a severity (critical/high/medium/low/info)
-    in result["findings"], alongside the 0-100 risk breakdown
+  v4 vs v3:
+  - False positives fixed: XML/XMP/SVG namespace URLs (ns.adobe.com,
+    w3.org, purl.org, iec.ch, videolan.org, …) and documentation domains
+    (github.com, docs.github.com, developer.android.com, reactjs.org,
+    slack.com, t.me, …) are NO LONGER counted as network domains or
+    insecure http endpoints. They are listed separately as ignored
+    namespace/docs strings and never add risk. Only real network http
+    endpoints count. Junk hosts such as "$" are rejected as invalid.
+  - Third-party tampering verdict: a dedicated "دستکاری شخص ثالث / تویک"
+    section. Injected dylibs are detected by their MobileSubstrate
+    install name (/Library/MobileSubstrate/DynamicLibraries/…), reported
+    separately with per-dylib domains/URLs, and the verdict says whether
+    a tweak dylib talks to an unknown server — or explicitly that none
+    was found in static strings, with the static-vs-runtime limit.
+  - .deb analysis: any .deb inside the IPA is extracted and analysed
+    separately (control metadata, contained files, install scripts).
+  - Risk is split: original app vs injected tweak (dylib/.deb), so a
+    100/100 shows which part is the tweak.
+  - Privacy answers are decisive where the evidence allows it, with
+    evidence per answer and honest limits (static vs runtime traffic).
+
+  Standards the method follows (learned from public sources, methods
+  only — no text copied):
+  - MobSF iOS binary scan: permissions, signing certificate, ATS
+    config, Mach-O binary protections (PIE, stack canary, ARC),
+    hardcoded secrets in plists/strings, tracker inventory.
+  - OWASP MASVS / MASTG: findings are mapped to MASVS categories
+    (STORAGE, CRYPTO, AUTH, NETWORK, PLATFORM, CODE, RESILIENCE,
+    PRIVACY); the standard's own warning is honoured — automated
+    static analysis is assistive, not conclusive, and its output can
+    contain both false positives and false negatives. Every finding
+    therefore carries a confidence level, and what only dynamic
+    analysis can prove (real traffic, certificate pinning behaviour,
+    server-side auth) is listed as a limit, never claimed.
+  - iOS static-assessment practice: hash the artifact first, read
+    identity/signature/entitlements before code, check the encryption
+    state (cryptid) before planning any deeper read, compare what the
+    provisioning profile grants with what the entitlements claim, and
+    treat findings on a development/ad-hoc build as build-configuration
+    findings, not properties of the distributed app.
+  - Jailbreak/tweak detection practice: an injected dylib is found by
+    enumerating loaded libraries (dyld image names) and comparing
+    them with the legitimate set — statically, that means the
+    dylib's install name and the presence of MobileSubstrate /
+    CydiaSubstrate / Frida artifacts in the bundle.
 
 Cannot do on an encrypted App Store IPA: binary strings / API-pattern
 analysis needs a decrypted IPA. FairPlay encryption is detected (cryptid)
@@ -33,7 +56,7 @@ and reported explicitly; that section is marked "unavailable", never faked.
 Usage:
   python3 scanner.py app.ipa [--json out.json] [--report out.md]
 """
-import argparse, hashlib, json, plistlib, re, struct, sys, tempfile, zipfile
+import argparse, hashlib, io, json, plistlib, re, struct, sys, tarfile, tempfile, zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -187,7 +210,52 @@ SUSPICIOUS_PATTERNS = [
     (r"DYLD_INSERT_LIBRARIES", "بررسی تزریق کتابخانه (DYLD_INSERT_LIBRARIES)", "Library injection check", 4),
 ]
 
-# Data types in PrivacyInfo.xcprivacy that are sensitive by themselves.
+# Weak-crypto patterns (MobSF-style SAST rules, static strings only).
+# Presence in strings does NOT prove the code path is reachable — these
+# are low-severity notes, never a verdict on their own.
+WEAK_CRYPTO_PATTERNS = [
+    (r"\bCC_MD5\b", "رمزنگاری ضعیف MD5 در کد", "Weak crypto: MD5", 3),
+    (r"\bCC_SHA1\b", "رمزنگاری ضعیف SHA1 در کد", "Weak crypto: SHA1", 3),
+    (r"kCCAlgorithmDES\b", "رمزنگاری DES در کد", "Weak crypto: DES", 4),
+    (r"kCCOptionECBMode\b", "حالت ECB در رمزنگاری (بدون IV)", "Weak crypto: ECB mode", 4),
+    (r"\bCCCrypt\b", "استفاده از CommonCrypto (CCCrypt) در کد", "CommonCrypto use", 1),
+]
+
+# Hardcoded-secret patterns (MobSF-style secret discovery). Only
+# well-known token prefixes and private-key markers are flagged, to
+# keep false positives low. Values are NEVER stored or printed — only
+# the secret type, the file it was found in, and a masked preview.
+SECRET_PATTERNS = [
+    (r"AKIA[0-9A-Z]{16}", "کلید دسترسی AWS", "AWS access key"),
+    (r"ghp_[A-Za-z0-9]{20,}", "توکن شخصی گیت‌هاب", "GitHub personal access token"),
+    (r"github_pat_[A-Za-z0-9_]{20,}", "توکن گیت‌هاب (fine-grained)", "GitHub fine-grained token"),
+    (r"xox[baprs]-[A-Za-z0-9-]{10,}", "توکن Slack", "Slack token"),
+    (r"sk_live_[A-Za-z0-9]{10,}", "کلید زنده Stripe", "Stripe live secret key"),
+    (r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", "کلید خصوصی در باندل", "Private key in bundle"),
+]
+
+# File paths that only exist on a jailbroken device / with substrate
+# injection. Found in strings, they are tampering evidence (dyld-image
+# enumeration is the runtime equivalent of this check).
+JAILBREAK_PATH_MARKERS = [
+    "/Library/MobileSubstrate/",
+    "CydiaSubstrate",
+    "FridaGadget",
+    "/Applications/Cydia.app",
+    "/Applications/Sileo.app",
+    "/private/var/lib/apt",
+    "/usr/sbin/sshd",
+    "DYLD_INSERT_LIBRARIES",
+]
+
+# MASVS category per risk category (OWASP MASVS 2.x).
+MASVS_BY_CATEGORY = {
+    "network": "MASVS-NETWORK",
+    "permissions": "MASVS-PLATFORM",
+    "privacy": "MASVS-PRIVACY",
+    "code": "MASVS-CODE",
+    "tweak": "MASVS-RESILIENCE",
+}
 HIGH_RISK_DATA_TYPES = {
     "NSPrivacyCollectedDataTypePreciseLocation": ("موقعیت دقیق", 8),
     "NSPrivacyCollectedDataTypeCoarseLocation": ("موقعیت تقریبی", 5),
@@ -241,13 +309,68 @@ SENSITIVE_ENTITLEMENTS = {
     "com.apple.developer.fileprovider.testing-mode": ("File Provider (دسترسی فایل)", "medium", 3),
     "com.apple.developer.default-data-protection": ("محافظت داده پیش‌فرض", "info", 0),
     "com.apple.developer.associated-appclip-app-identifiers": ("App Clip مرتبط", "low", 0),
-    "com.apple.security.application-groups": ("گروه اپلیکیشن (اشتراک داده بین برنامه‌ها)", "medium", 3),
+    "com.apple.security.application-groups": ("گروه اپلیکیشن (اشتراک داده بین برنامه‌ها)", "low", 0),
     "com.apple.developer.kernel.extended-virtual-addressing": ("آدرس‌دهی مجازی گسترده کرنل", "medium", 3),
     "com.apple.developer.playable-content": ("محتوای قابل پخش", "info", 0),
     "com.apple.developer.usernotifications.filtering": ("فیلتر نوتیفیکیشن", "low", 0),
 }
 
 IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+# --- URL classification (v4 false-positive fix) ---------------------------
+# These hosts/paths are XML/XMP/SVG *namespaces* or documentation strings
+# embedded in files — they are identifiers, not network endpoints the app
+# calls. Counting them as "domains" or "insecure http" inflated the risk
+# (e.g. the PDF Hero report listed ns.adobe.com, w3.org, purl.org,
+# iec.ch, videolan.org and 18 "insecure http" namespace URLs).
+NAMESPACE_HOSTS = {
+    "ns.adobe.com", "www.w3.org", "w3.org", "purl.org", "www.purl.org",
+    "www.iec.ch", "iec.ch", "www.videolan.org", "videolan.org",
+    "schemas.xmlsoap.org", "schemas.microsoft.com",
+    "www.w3schools.com", "www.w3.org",
+}
+NAMESPACE_PATH_PREFIXES = (
+    "/1998/", "/1999/", "/2000/", "/2001/", "/XML/", "/Graphics/",
+    "/dc/", "/xap/", "/pdf/", "/sType/", "/xmp/", "/svg",
+    "/1999/02/22-rdf-syntax-ns", "/2000/svg",
+)
+# Documentation / company-homepage hosts: strings found in frameworks,
+# privacy bundles and docs, not API endpoints the app calls at runtime.
+# (github.com, api.github.com, docs.github.com, git.io,
+# developer.android.com, reactjs.org, slack.com, t.me, www.adobe.com …)
+DOCS_HOSTS = {
+    "github.com", "api.github.com", "docs.github.com", "git.io",
+    "developer.android.com", "developer.apple.com", "www.apple.com",
+    "reactjs.org", "slack.com", "t.me", "telegram.org",
+    "stackoverflow.com", "www.adobe.com", "adobe.com",
+    "www.bendingspoons.com", "bendingspoons.com",
+}
+VALID_HOST_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+
+
+def classify_url(url):
+    """Classify an embedded URL string.
+
+    Returns one of: "network" (a real network endpoint),
+    "namespace" (XML/XMP/SVG namespace identifier),
+    "docs" (documentation / homepage string, not an API call),
+    "invalid" (not a usable host at all, e.g. "$").
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        path = urlparse(url).path or ""
+    except Exception:
+        return "invalid"
+    if not host or not VALID_HOST_RE.match(host):
+        return "invalid"
+    if host in NAMESPACE_HOSTS:
+        return "namespace"
+    if any(path.startswith(p) for p in NAMESPACE_PATH_PREFIXES):
+        return "namespace"
+    if host in DOCS_HOSTS:
+        return "docs"
+    return "network"
 
 
 def severity_for_points(points):
@@ -450,17 +573,40 @@ def build_privacy_answers(r):
         q1_evidence.append(f"{len(http_urls)} آدرس http:// ناامن در باندل پیدا شد.")
     q1_limits.append("تحلیل ایستا فقط «توانایی» و «آدرس سرورها» را نشان می‌دهد؛ "
                      "اینکه واقعاً چه فایلی و چه زمانی ارسال می‌شود فقط با رصد ترافیک زمان اجرا مشخص می‌شود.")
+    # v4: decisive where the evidence allows it. `domains` here are already
+    # real network domains only (namespace/docs strings are excluded).
     if photo_perm and domains:
-        q1_verdict, q1_short = "possible", "ممکن است — دسترسی به عکس + سرور دارد"
+        q1_verdict, q1_short = "yes", (f"بله — دسترسی به عکس دارد و با {len(domains)} "
+                                       "سرور واقعی ارتباط می‌گیرد")
     elif photo_perm:
-        q1_verdict, q1_short = "possible", "ممکن است — دسترسی به عکس دارد ولی سروری پیدا نشد"
+        q1_verdict, q1_short = "possible", "ممکن است — دسترسی به عکس دارد ولی سرور واقعی پیدا نشد"
     elif domains:
         q1_verdict, q1_short = "possible", "ممکن است — سرور دارد ولی دسترسی عکس اعلام نشده"
     else:
-        q1_verdict, q1_short = "no-evidence", "شواهدی نیست"
+        q1_verdict, q1_short = "no-evidence", "شواهدی نیست — نه دسترسی عکس، نه سرور"
 
     # ---- Q2: could the mod maker / a third party see user photos/videos? ----
+    # v4: decisive — an injected dylib runs *inside* the app process, so it
+    # can reach whatever the app itself can reach (photos, keychain). The
+    # question is then only whether it has its own server channel.
+    tamp = r.get("tampering") or {}
     q2_evidence, q2_limits = [], []
+    if tamp.get("tampered"):
+        q2_evidence.append("دستکاری شخص ثالث تأیید شد: "
+                            f"{tamp.get('injected_dylib_count', 0)} dylib تزریقی "
+                            "(MobileSubstrate) در باندل است: " +
+                            "، ".join(d["name"] for d in tamp.get("injected_dylibs", [])))
+        for d in tamp.get("injected_dylibs", []):
+            for h in d.get("suspicious", [])[:3]:
+                q2_evidence.append(f"در `{d['name']}`: {h['label_fa']} ({h['matches']} مورد)")
+        q2_evidence.append(tamp.get("server_note_fa", ""))
+        if tamp.get("unknown_tweak_servers"):
+            q2_evidence.append("سرورهای ناشناخته‌ی توئیک: "
+                               + "، ".join(tamp["unknown_tweak_servers"]))
+        if photo_perm:
+            q2_evidence.append("برنامه به گالری عکس دسترسی دارد و توئیک داخل "
+                               "همین پروسس اجرا می‌شود — یعنی از نظر فنی به "
+                               "همان عکس‌هایی دسترسی دارد که برنامه دارد.")
     if trackers:
         q2_evidence.append(f"{len(trackers)} ترکر/SDK شخص ثالث در باندل است: "
                             + "، ".join(t["tracker"] for t in trackers[:8]))
@@ -475,7 +621,7 @@ def build_privacy_answers(r):
         q2_evidence.append("دامنه‌های ردیابی اعلام‌شده در مانیفست: "
                             + "، ".join(pm["tracking_domains"][:5]))
     if http_urls:
-        q2_evidence.append(f"ارسال با http ناامن ({len(http_urls)} آدرس) یعنی محتوای ارسالی "
+        q2_evidence.append(f"ارسال با http ناامن ({len(http_urls)} آدرس واقعی) یعنی محتوای ارسالی "
                             "در مسیر قابل شنود است.")
     if suspicious:
         names = [h["label_fa"] for h in suspicious]
@@ -483,9 +629,16 @@ def build_privacy_answers(r):
     if encrypted:
         q2_limits.append("باینری رمزگذاری‌شده است؛ الگوهای API باینری قابل بررسی نبود، "
                          "پس نبودِ نشانه دلیل قطعی بر نبودِ دسترسی نیست.")
-    q2_limits.append("این اسکن نمی‌تواند بگوید سازنده‌ی ماد واقعاً چه می‌بیند؛ "
-                     "فقط نشان می‌دهد چه کانال‌هایی برای خروج داده وجود دارد.")
-    if trackers or tracker_domains or http_urls or pm.get("tracking"):
+    q2_limits.append("اینکه dylib تزریقی واقعاً چه داده‌ای می‌فرستد فقط با رصد "
+                     "ترافیک زمان اجرا مشخص می‌شود؛ تحلیل ایستا فقط توانایی "
+                     "و کانال‌های موجود را نشان می‌دهد.")
+    if tamp.get("tampered"):
+        if tamp.get("unknown_tweak_servers"):
+            q2_verdict, q2_short = ("yes", "بله — توئیک تزریق‌شده به سرور ناشناخته‌ی خودش وصل می‌شود")
+        else:
+            q2_verdict, q2_short = ("yes", "بله — توئیک داخل برنامه اجرا می‌شود و به داده‌های برنامه دسترسی دارد، "
+                                     "ولی سرور ناشناخته‌ای در رشته‌هایش پیدا نشد")
+    elif trackers or tracker_domains or http_urls or pm.get("tracking"):
         q2_verdict, q2_short = "possible", "ممکن است — کانال خروج داده به شخص ثالث وجود دارد"
     elif encrypted:
         q2_verdict, q2_short = "unknown", "قابل بررسی نیست — باینری رمزگذاری‌شده است"
@@ -541,18 +694,35 @@ def build_privacy_answers(r):
         unverified.append("باینری رمزگذاری‌شده است (FairPlay)؛ تحلیل رشته‌ها و الگوهای API باینری انجام نشد.")
     else:
         verified.append(f"باینری رمزگذاری نشده؛ {len(suspicious)} الگوی مشکوک در رشته‌های باینری بررسی شد.")
+    tamp = r.get("tampering") or {}
+    if tamp.get("tampered"):
+        verified.append("دستکاری شخص ثالث بررسی شد: "
+                        f"{tamp.get('injected_dylib_count', 0)} dylib تزریقی پیدا شد.")
     unverified.append("محتوای واقعی ترافیک شبکه و رفتار زمان اجرا با اسکن ایستا قابل بررسی نیست.")
     unverified.append("اینکه سازنده‌ی ماد واقعاً چه داده‌ای می‌بیند، فقط با رصد ترافیک و تست زمان اجرا مشخص می‌شود.")
-    if encrypted:
+    if tamp.get("tampered"):
+        q4_verdict, q4_short = "risky", "بالا — دستکاری شخص ثالث تأیید شد؛ با احتیاط استفاده کنید"
+    elif encrypted:
         q4_verdict, q4_short = "partial", "بررسی ناقص — باینری رمزگذاری‌شده است"
-    elif r.get("risk", {}).get("score", 0) >= 55:
-        q4_verdict, q4_short = "risky", "پرخطر — نشانه‌های جدی حریم خصوصی دارد"
-    elif r.get("risk", {}).get("score", 0) >= 25:
-        q4_verdict, q4_short = "caution", "احتیاط — چند نشانه‌ی حریم خصوصی دارد"
+    elif r.get("risk", {}).get("score", 0) >= 60:
+        q4_verdict, q4_short = "risky", "بالا — چند نشانه‌ی واقعی دارد؛ با احتیاط استفاده کنید"
+    elif r.get("risk", {}).get("score", 0) >= 30:
+        q4_verdict, q4_short = "caution", "متوسط — چند نکته‌ی حریم خصوصی دارد، جای نگرانی جدی نیست"
     else:
         q4_verdict, q4_short = "ok", "کم‌ریسک — نشانه‌ی جدی پیدا نشد"
 
+    # ---- Q5: third-party tampering (the user's main question) ----
+    if tamp.get("tampered"):
+        q5_verdict, q5_short = "yes", tamp.get("verdict_fa", "بله — دستکاری شده است")
+    else:
+        q5_verdict, q5_short = "no-evidence", "شواهدی از دستکاری پیدا نشد"
+
     return [
+        {"id": "tampering",
+         "question_fa": "آیا این نسخه (توئیک) غیر از شرکت اصلی، توسط شخص ثالث دستکاری شده تا داده به خودش برسد؟",
+         "verdict": q5_verdict, "answer_fa": q5_short,
+         "evidence": list(tamp.get("evidence", [])) + [tamp.get("server_note_fa", "")],
+         "limits": list(tamp.get("limits", []))},
         {"id": "sends_photos_to_server",
          "question_fa": "آیا برنامه عکس‌ها/فایل‌ها را به سرور یا فضای ابری می‌فرستد؟",
          "verdict": q1_verdict, "answer_fa": q1_short,
@@ -578,12 +748,16 @@ UTF16_STR_RE = re.compile(rb"(?:[ -~]\x00){4,}")
 # Apple DTD is a known false positive inside mobileprovision — never count it.
 APPLE_DTD_HOST = "www.apple.com"
 
-def sha256_of(path):
-    h = hashlib.sha256()
+def hashes_of(path):
+    """SHA-256 + MD5 + SHA-1 of the artifact (MobSF/iOS static practice:
+    record the hashes alongside bundle id/version before any analysis)."""
+    out = {"sha256": hashlib.sha256(), "md5": hashlib.md5(),
+           "sha1": hashlib.sha1()}
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+            for h in out.values():
+                h.update(chunk)
+    return {k: v.hexdigest() for k, v in out.items()}
 
 def safe_extract(ipa_path, dest):
     dest = Path(dest).resolve()
@@ -654,18 +828,21 @@ def _parse_macho_slice(data, base_off=0):
         if is64:
             # 64-bit header after magic: cputype, cpusubtype, filetype,
             # ncmds, sizeofcmds, flags, reserved (7 x uint32 = 28 bytes)
-            cputype, cpusubtype, _ft, ncmds, sizeofcmds, _fl, _res = struct.unpack(
+            cputype, cpusubtype, _ft, ncmds, sizeofcmds, flags, _res = struct.unpack(
                 fmt + "IIIIIII", data[off + 4:off + 32])
             cmd_off = off + 32
         else:
             # 32-bit header after magic: 6 x uint32 = 24 bytes
-            cputype, cpusubtype, _ft, ncmds, sizeofcmds, _fl = struct.unpack(
+            cputype, cpusubtype, _ft, ncmds, sizeofcmds, flags = struct.unpack(
                 fmt + "IIIIII", data[off + 4:off + 28])
             cmd_off = off + 28
     except Exception as e:
         return {"is_macho": True, "error": str(e)}
     out = {"is_macho": True, "is64": bool(is64),
            "cpu": CPU_TYPES.get(cputype, f"0x{cputype:08x}"),
+           "filetype": _ft, "flags": flags,
+           # MH_PIE (0x200000): position-independent executable.
+           "pie": bool(flags & 0x200000),
            "cryptid": None, "encrypted": None,
            "linked_dylibs": [], "rpaths": [], "min_os": None,
            "uuid": None, "has_code_signature": False, "has_main": False,
@@ -761,14 +938,23 @@ def extract_strings(data):
     return out
 
 def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES):
-    """Only call when NOT encrypted. Returns URLs/domains + suspicious hits."""
+    """Only call when NOT encrypted. Returns URLs/domains + suspicious hits.
+
+    v4: only *network* URLs are counted. Namespace/docs/invalid URL
+    strings are returned separately in "ignored_urls" with their reason
+    and never add risk.
+    """
     try:
         data = exe_path.read_bytes()[:max_bytes]
     except Exception as e:
         return {"error": str(e)}
-    urls, domains, http_urls = set(), set(), set()
+    urls, domains, http_urls, ignored = set(), set(), set(), []
     for m in URL_RE.finditer(data):
         u = m.group(0).decode("ascii", "ignore").rstrip(".,);\"'")
+        kind = classify_url(u)
+        if kind != "network":
+            ignored.append({"url": u, "reason": kind})
+            continue
         urls.add(u)
         host = urlparse(u).hostname
         if host:
@@ -785,14 +971,24 @@ def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES):
                          "points": pts, "matches": count})
     return {"string_count": len(strings), "urls": sorted(urls),
             "domains": sorted(domains), "insecure_http_urls": sorted(http_urls),
-            "suspicious": hits}
+            "ignored_urls": ignored, "suspicious": hits}
 
 def scan_bundle_files(app_dir):
     """URLs/domains from all small files inside .app (plists, json, configs).
-    Apple DTD host is excluded from the insecure list (v1 false positive)."""
+    Apple DTD host is excluded from the insecure list (v1 false positive).
+    v4: only *network* URLs are counted; namespace/docs/invalid strings
+    go to the ignored list and never add risk."""
     urls, domains, http_urls = set(), set(), set()
+    ignored = []
     for p in sorted(app_dir.rglob("*")):
         if not p.is_file() or p.is_symlink():
+            continue
+        # v4: .dylib files are analysed separately per-dylib (analyze_dylib)
+        # and their URLs are merged afterwards. Scanning them here too
+        # would leak a tweak dylib's servers into the "original app"
+        # domain set — exactly the bug that hid tweak-evil.example.com
+        # in the PDF Hero scan's tampering verdict.
+        if p.suffix == ".dylib":
             continue
         try:
             if p.stat().st_size > MAX_SCAN_BYTES:
@@ -802,13 +998,18 @@ def scan_bundle_files(app_dir):
             continue
         for m in URL_RE.finditer(data):
             u = m.group(0).decode("ascii", "ignore").rstrip(".,);\"'")
+            kind = classify_url(u)
+            if kind != "network":
+                ignored.append({"url": u, "reason": kind,
+                                "file": str(p.relative_to(app_dir))})
+                continue
             urls.add(u)
             host = urlparse(u).hostname
             if host:
                 domains.add(host.lower())
             if u.startswith("http://") and host != APPLE_DTD_HOST:
                 http_urls.add(u)
-    return sorted(urls), sorted(domains), sorted(http_urls)
+    return sorted(urls), sorted(domains), sorted(http_urls), ignored
 
 def parse_mobileprovision(path):
     try:
@@ -910,13 +1111,412 @@ def analyze_dylib(path, app_dir):
     entry["urls"] = strings_result.get("urls", [])
     entry["domains"] = strings_result.get("domains", [])
     entry["insecure_http_urls"] = strings_result.get("insecure_http_urls", [])
-    entry["suspicious"] = strings_result.get("suspicious", [])
+    hits = strings_result.get("suspicious", [])
+    # v4: dlopen/dlsym inside Swift stdlib dylibs (libswift_*.dylib) is
+    # normal Swift-runtime behaviour, not a suspicious signal — the
+    # PDF Hero report wrongly flagged libswift_Concurrency.dylib for it.
+    if path.name.lower().startswith("libswift"):
+        hits = [h for h in hits if h.get("pattern") != r"dlopen|dlsym"]
+    entry["suspicious"] = hits
     pts = sum(h.get("points", 0) for h in entry["suspicious"])
     if entry["tracker"]:
         pts += 5
     entry["risk_points"] = pts
     entry["severity"] = severity_for_points(pts)
     return entry
+
+
+# ---------------- MobSF-style checks (binary protections, secrets,
+# weak crypto, runtime family, app extensions, jailbreak artifacts) ----
+def binary_protections(macho, strings):
+    """Mach-O hardening evidence (MobSF binary_analysis: PIE, stack
+    canary, ARC). Absence is a low-severity note, not a verdict: these
+    protections are expected in a release build, and their absence
+    alone does not make an app malicious."""
+    if not macho.get("is_macho"):
+        return {"available": False, "reason": "Mach-O نیست"}
+    joined = "\n".join(strings or [])
+    return {
+        "available": True,
+        "pie": bool(macho.get("pie")),
+        "stack_canary": ("___stack_chk_guard" in joined
+                         or "__stack_chk_fail" in joined),
+        "arc": ("objc_storeStrong" in joined
+                or "objc_retainAutoreleasedReturnValue" in joined),
+        "note": ("NX/Stack canaries are on by default on iOS; PIE is "
+                 "expected in a release build."),
+    }
+
+
+def scan_secrets(strings, source_label):
+    """Hardcoded-secret discovery over extracted strings.
+
+    Only well-known token prefixes / private-key markers are flagged.
+    The secret VALUE is never returned — only its type, where it was
+    found, and a masked preview (first 4 chars + length)."""
+    found = []
+    for s in strings or []:
+        for pat, label_fa, label_en in SECRET_PATTERNS:
+            m = re.search(pat, s)
+            if m:
+                val = m.group(0)
+                found.append({
+                    "type_fa": label_fa, "type_en": label_en,
+                    "source": source_label,
+                    "masked": (val[:4] + "…" + f"({len(val)} chars)"),
+                })
+                break
+    seen, out = set(), []
+    for f in found:
+        key = (f["type_en"], f["source"])
+        if key not in seen:
+            seen.add(key)
+            out.append(f)
+    return out
+
+
+def scan_weak_crypto(strings):
+    """Weak-crypto string patterns. Low severity by design: presence in
+    strings does not prove the code path runs."""
+    hits = []
+    for pat, fa, en, pts in WEAK_CRYPTO_PATTERNS:
+        rx = re.compile(pat)
+        count = sum(1 for s in (strings or []) if rx.search(s))
+        if count:
+            hits.append({"pattern": pat, "label_fa": fa, "label_en": en,
+                         "points": pts, "matches": count})
+    return hits
+
+
+def detect_runtime_family(app_dir, frameworks, bundles):
+    """Which runtime the app's logic lives in (native / React Native /
+    Flutter / Unity / …), from the frameworks actually present. This
+    matters because in a Flutter/React Native app the interesting
+    payload is a JS bundle or AOT blob, not the Mach-O."""
+    names = " ".join((frameworks or []) + (bundles or [])).lower()
+    files = {p.name.lower() for p in Path(app_dir).rglob("*") if p.is_file()}
+    if "flutter.framework" in names or "app.framework" in files:
+        return "Flutter"
+    if "unityframework.framework" in names or "unityframework" in names:
+        return "Unity"
+    if "hermes" in names or any("libreact" in n for n in names.split()):
+        return "React Native"
+    if "cordova" in names or "cdv" in names:
+        return "Cordova"
+    if "xamarin" in names:
+        return "Xamarin"
+    return "Native (Swift/Objective-C)"
+
+
+def analyze_appex(app_dir):
+    """Each .appex is a separate process with its own entitlements and
+    container — an extension granted an app group the app lacks has
+    widened reach without the app binary. Read each extension's own
+    Info.plist (identity + permissions) and code-signature presence."""
+    plugins = app_dir / "PlugIns"
+    out = []
+    if not plugins.is_dir():
+        return out
+    for appex in sorted(plugins.glob("*.appex")):
+        entry = {"name": appex.name, "bundle_id": None,
+                 "permissions": [], "has_code_signature": False,
+                 "has_embedded_provision": False}
+        plist = appex / "Info.plist"
+        if plist.is_file():
+            try:
+                with open(plist, "rb") as f:
+                    pl = plistlib.load(f)
+                entry["bundle_id"] = pl.get("CFBundleIdentifier")
+                for key, (fa, en, _risk) in PERMISSIONS.items():
+                    if key in pl:
+                        entry["permissions"].append(
+                            {"key": key, "label_fa": fa, "label_en": en})
+            except Exception:
+                pass
+        entry["has_code_signature"] = (appex / "_CodeSignature").is_dir()
+        entry["has_embedded_provision"] = (appex / "embedded.mobileprovision").is_file()
+        out.append(entry)
+    return out
+
+
+def find_jailbreak_artifacts(strings_by_source):
+    """Jailbreak/substrate artifact paths found in binary/dylib strings.
+
+    The runtime equivalent is enumerating dyld images and comparing
+    them with the legitimate set; statically, a substrate path string
+    in the main binary is evidence the code knows about (or ships)
+    jailbreak tooling. Returns [{marker, source}]."""
+    found, seen = [], set()
+    for source, strings in (strings_by_source or {}).items():
+        for s in strings or []:
+            for marker in JAILBREAK_PATH_MARKERS:
+                if marker in s and (marker, source) not in seen:
+                    seen.add((marker, source))
+                    found.append({"marker": marker, "source": source})
+    return found
+
+
+# ---------------- .deb analysis (v4) ----------------
+MAX_DEB_BYTES = 512 * 1024 * 1024
+
+
+def _parse_ar(data):
+    """Parse a Unix ar archive (the .deb container). Returns {name: bytes}."""
+    if not data.startswith(b"!<arch>\n"):
+        return None
+    members = {}
+    off = 8
+    while off + 60 <= len(data):
+        header = data[off:off + 60]
+        try:
+            name = header[0:16].decode("ascii", "ignore").strip()
+            size = int(header[48:58].decode("ascii", "ignore").strip() or "0")
+        except ValueError:
+            break
+        if name.endswith("/"):
+            name = name[:-1]
+        members[name] = data[off + 60:off + 60 + size]
+        off += 60 + size + (size % 2)
+    return members
+
+
+def _open_tar_member(data):
+    """Open a .deb control/data tar member (gz/bz2/xz). Returns TarFile or None."""
+    try:
+        return tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+    except (tarfile.TarError, EOFError, OSError):
+        return None
+
+
+def _parse_debian_control(text):
+    """Parse a Debian control file (Package/Version/Maintainer/…)."""
+    out = {}
+    key = None
+    for line in text.splitlines():
+        if line.startswith((" ", "\t")) and key:
+            out[key] += "\n" + line.strip()
+        elif ":" in line:
+            key, _, val = line.partition(":")
+            key = key.strip().lower()
+            out[key] = val.strip()
+        else:
+            key = None
+    return out
+
+
+def analyze_deb(path, app_dir):
+    """Analyse one .deb file inside the IPA, separately.
+
+    Extracts control metadata (package, version, maintainer, description,
+    depends), the list of contained files, and pre/post-install scripts.
+    A .deb whose files live under Library/MobileSubstrate is a jailbreak
+    tweak package — that is flagged, not hidden.
+    """
+    rel = str(path.relative_to(app_dir)) if str(path).startswith(str(app_dir)) else path.name
+    entry = {"name": path.name, "path": rel, "size_bytes": 0,
+             "package": None, "version": None, "architecture": None,
+             "maintainer": None, "description": None, "depends": None,
+             "section": None, "files": [], "scripts": {},
+             "dylib_files": [], "is_tweak": False,
+             "unavailable": None, "error": None}
+    try:
+        size = path.stat().st_size
+        entry["size_bytes"] = size
+    except Exception as e:
+        entry["error"] = str(e)
+        return entry
+    if size > MAX_DEB_BYTES:
+        entry["unavailable"] = "فایل .deb خیلی بزرگ است — تحلیل نشد"
+        return entry
+    try:
+        data = path.read_bytes()
+    except Exception as e:
+        entry["error"] = str(e)
+        return entry
+    members = _parse_ar(data)
+    if members is None:
+        entry["unavailable"] = "فرمت ar/deb نیست — قابل استخراج نیست"
+        return entry
+    # --- control.tar.* ---
+    control_tar = None
+    for name, blob in members.items():
+        if name.startswith("control.tar"):
+            control_tar = blob
+            break
+    if control_tar is None:
+        entry["unavailable"] = "بخش control.tar در .deb پیدا نشد"
+    else:
+        tf = _open_tar_member(control_tar)
+        if tf is None:
+            entry["unavailable"] = "control.tar قابل باز کردن نیست (شاید zstd)"
+        else:
+            with tf:
+                for m in tf.getmembers():
+                    base = m.name.lstrip("./")
+                    if base in ("control", "./control"):
+                        try:
+                            text = tf.extractfile(m).read().decode("utf-8", "replace")
+                            ctl = _parse_debian_control(text)
+                            entry["package"] = ctl.get("package")
+                            entry["version"] = ctl.get("version")
+                            entry["architecture"] = ctl.get("architecture")
+                            entry["maintainer"] = ctl.get("maintainer")
+                            entry["description"] = (ctl.get("description") or "")[:300]
+                            entry["depends"] = ctl.get("depends")
+                            entry["section"] = ctl.get("section")
+                        except Exception as e:
+                            entry["error"] = f"control parse failed: {e}"
+                    elif base in ("preinst", "postinst", "prerm", "postrm"):
+                        try:
+                            entry["scripts"][base] = tf.extractfile(m).read().decode(
+                                "utf-8", "replace")[:2000]
+                        except Exception:
+                            pass
+    # --- data.tar.* ---
+    data_tar = None
+    for name, blob in members.items():
+        if name.startswith("data.tar"):
+            data_tar = blob
+            break
+    if data_tar is not None:
+        tf = _open_tar_member(data_tar)
+        if tf is not None:
+            with tf:
+                for m in tf.getmembers():
+                    entry["files"].append(m.name)
+                    if m.name.endswith(".dylib"):
+                        entry["dylib_files"].append(m.name)
+    entry["files"] = sorted(entry["files"])[:200]
+    entry["dylib_files"] = sorted(entry["dylib_files"])
+    tweak_markers = ("MobileSubstrate", "CydiaSubstrate", "Library/MobileSubstrate")
+    if any(mk in f for f in entry["files"] for mk in tweak_markers) \
+            or any(mk in (entry["package"] or "") for mk in ("substrate",)):
+        entry["is_tweak"] = True
+    return entry
+
+
+# ---------------- third-party tampering detection (v4) ----------------
+TWEAK_NAME_HINTS = ("patch", "blatant", "sideload", "keychainfix",
+                    "substrate", "tweak", "crack", "unlock")
+
+
+def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
+    """Decide whether this IPA was tampered with by a third party besides
+    the original company, and whether the injected code talks to its own
+    server. Returns the tampering dict stored in result["tampering"].
+
+    Signals (strongest first):
+    1. A dylib whose install name lives in /Library/MobileSubstrate/
+       DynamicLibraries/ — normal App Store apps never ship those; that
+       is a jailbreak tweak injected into the app process.
+    2. A .deb package whose files live under Library/MobileSubstrate.
+    3. Substrate loader files present in the bundle.
+    Per-dylib domains/URLs are compared against the original app's
+    network domains: a tweak dylib domain that the original app never
+    talks to is an "unknown tweak server".
+    """
+    injected = []
+    for d in (dylib_analysis or []):
+        reasons = []
+        linked = d.get("linked_dylibs") or []
+        ms_names = [l for l in linked
+                    if "/Library/MobileSubstrate/" in l or "MobileSubstrate" in l
+                    or "CydiaSubstrate" in l]
+        if ms_names:
+            reasons.append("install name در MobileSubstrate است: " + ms_names[0])
+        name_low = (d.get("name") or "").lower()
+        if any(h in name_low for h in ("patch", "blatant", "sideload", "keychainfix")):
+            reasons.append("نام فایل نشانه‌ی پچ/توئیک است: " + d.get("name", ""))
+        if d.get("path", "").startswith("Frameworks/") and ms_names:
+            reasons.append("در Frameworks برنامه قرار دارد ولی لودر آن MobileSubstrate است")
+        if reasons:
+            injected.append({
+                "name": d.get("name"), "path": d.get("path"),
+                "size_bytes": d.get("size_bytes"),
+                "risk_points": d.get("risk_points", 0),
+                "severity": d.get("severity"),
+                "reasons_fa": reasons,
+                "domains": d.get("domains", []),
+                "insecure_http_urls": d.get("insecure_http_urls", []),
+                "urls": d.get("urls", []),
+                "suspicious": d.get("suspicious", []),
+                "unavailable": d.get("unavailable"),
+            })
+    tweak_debs = [p for p in (deb_packages or []) if p.get("is_tweak")]
+    evidence = []
+    for d in injected:
+        evidence.append(
+            f"dylib تزریقی `{d['name']}` — " + "؛ ".join(d["reasons_fa"]))
+        for h in d.get("suspicious", [])[:4]:
+            evidence.append(
+                f"  • در `{d['name']}`: {h['label_fa']} ({h['matches']} مورد)")
+        if d.get("unavailable"):
+            evidence.append(f"  • `{d['name']}`: {d['unavailable']}")
+    for p in tweak_debs:
+        evidence.append(
+            f"بسته‌ی .deb توئیک: `{p.get('package') or p['name']}`"
+            f" نسخه‌ی {p.get('version') or '—'} — فایل‌های آن زیر Library/MobileSubstrate است")
+    for f in (substrate_files or [])[:5]:
+        evidence.append(f"فایل MobileSubstrate در باندل: `{f}`")
+
+    # Per-tweak-dylib servers vs the original app's own network domains.
+    original_domains = set(result.get("_original_domains") or [])
+    known_tracker_hosts = set()
+    for dom in (result.get("domain_analysis") or []):
+        if dom.get("is_tracker_domain"):
+            known_tracker_hosts.add(dom["domain"])
+    tweak_domains = sorted({dom for d in injected for dom in (d.get("domains") or [])})
+    unknown_tweak_servers = [
+        dom for dom in tweak_domains
+        if dom not in original_domains and dom not in known_tracker_hosts
+    ]
+    tweak_http = sorted({u for d in injected for u in (d.get("insecure_http_urls") or [])})
+
+    tampered = bool(injected or tweak_debs or substrate_files)
+    if tampered:
+        verdict_fa = "بله — دستکاری شخص ثالث تأیید شد"
+        verdict_en = "tampered"
+        if unknown_tweak_servers:
+            server_note = ("dylibهای تزریقی با این سرورهای ناشناخته صحبت می‌کنند: "
+                           + "، ".join(unknown_tweak_servers))
+        elif tweak_domains:
+            server_note = ("dylibهای تزریقی دامنه دارند ولی همه‌ی آن‌ها دامنه‌های "
+                           "خود برنامه‌ی اصلی یا ترکرهای شناخته‌شده‌اند؛ "
+                           "سرور ناشناخته‌ی جداگانه‌ای پیدا نشد.")
+        else:
+            server_note = ("در رشته‌های ایستای dylibهای تزریقی هیچ دامنه/سروری "
+                           "پیدا نشد — یعنی شواهدی از ارسال مستقیم داده به "
+                           "سرور شخص ثالث نیست.")
+    else:
+        verdict_fa = "شواهدی از دستکاری شخص ثالث پیدا نشد"
+        verdict_en = "not-found"
+        server_note = ("هیچ dylib تزریقی (MobileSubstrate)، بسته‌ی .deb توئیک "
+                       "یا فایل Substrate در باندل پیدا نشد.")
+    limits = [
+        "تحلیل ایستا فقط رشته‌ها و دامنه‌های ثابت در فایل را می‌بیند؛ "
+        "آدرس سرور می‌تواند در زمان اجرا ساخته شود یا dylib می‌تواند از "
+        "اتصال شبکه‌ی خود برنامه استفاده کند، بدون اینکه سرور جداگانه‌ای داشته باشد.",
+        "اینکه dylib تزریقی واقعاً چه داده‌ای می‌فرستد فقط با رصد ترافیک "
+        "زمان اجرا (پراکسی/لاگ شبکه) مشخص می‌شود.",
+    ]
+    if result.get("binary", {}).get("encrypted") is True:
+        limits.append("باینری اصلی رمزگذاری‌شده است؛ الگوهای باینری اصلی قابل بررسی نبود.")
+    return {
+        "tampered": tampered,
+        "verdict": verdict_en,
+        "verdict_fa": verdict_fa,
+        "confidence": "high" if tampered else "medium",
+        "injected_dylibs": injected,
+        "injected_dylib_count": len(injected),
+        "tweak_deb_packages": [p.get("package") or p.get("name") for p in tweak_debs],
+        "substrate_files": list(substrate_files or []),
+        "tweak_domains": tweak_domains,
+        "unknown_tweak_servers": unknown_tweak_servers,
+        "tweak_insecure_http_urls": tweak_http,
+        "server_note_fa": server_note,
+        "evidence": evidence,
+        "limits": limits,
+    }
 
 
 # ---------------- main scan ----------------
@@ -926,9 +1526,9 @@ def scan_ipa(ipa_path, workdir):
         raise FileNotFoundError(f"IPA not found: {ipa_path}")
     result = {
         "file": str(ipa_path),
-        "sha256": sha256_of(ipa_path),
+        **hashes_of(ipa_path),
         "size_bytes": ipa_path.stat().st_size,
-        "scanner": "sibstar-ipa-scanner 3.0 (stdlib only)",
+        "scanner": "sibstar-ipa-scanner 4.0 (stdlib only)",
         "limits": [
             "App Store IPAs are FairPlay-encrypted: binary string / API-pattern analysis needs a decrypted IPA.",
             "This scan reads Info.plist, PrivacyInfo.xcprivacy, frameworks, entitlements, ATS and embedded URLs without decryption.",
@@ -1022,6 +1622,13 @@ def scan_ipa(ipa_path, workdir):
     result["bundles"] = bundles
     result["app_extensions"] = extensions
     result["framework_details"] = framework_details(app_dir, frameworks)
+    # Runtime family (native / Flutter / React Native / Unity …) — in a
+    # Flutter/React Native app the logic lives in a JS bundle or AOT blob,
+    # not in the Mach-O, so the binary-pattern section must be read
+    # with that in mind.
+    result["runtime_family"] = detect_runtime_family(app_dir, frameworks, bundles)
+    # App extensions are separate processes with their own entitlements.
+    result["app_extension_details"] = analyze_appex(app_dir)
     result["size_breakdown"] = {
         "total_bytes": sum(p.stat().st_size for p in app_dir.rglob("*") if p.is_file()),
         "frameworks_bytes": fw_size,
@@ -1098,6 +1705,32 @@ def scan_ipa(ipa_path, workdir):
     result["binary"] = binary
     result["binary_strings"] = bin_strings
 
+    # MobSF-style binary checks (only on a decrypted binary).
+    _main_strings = []
+    if bin_strings and not bin_strings.get("unavailable") and exe_path and exe_path.is_file():
+        try:
+            _main_strings = extract_strings(exe_path.read_bytes()[:MAX_SCAN_BYTES])
+        except Exception:
+            _main_strings = []
+    result["binary_protections"] = binary_protections(binary, _main_strings)
+    result["hardcoded_secrets"] = scan_secrets(_main_strings, "باینری اصلی")
+    result["weak_crypto"] = scan_weak_crypto(_main_strings)
+    # Secrets can also hide in plist values: keys that look like
+    # api-key / secret / password / token with a long random-looking value.
+    for _fname, _plist in (("Info.plist", info),):
+        for _k, _v in _plist.items():
+            if isinstance(_v, str) and len(_v) >= 20 and re.search(
+                    r"(?i)(api[_-]?key|secret|password|token)", _k):
+                if not _v.startswith(("http://", "https://")):
+                    result["hardcoded_secrets"].append({
+                        "type_fa": f"مقدار مشکوک در Info.plist ({_k})",
+                        "type_en": f"suspicious plist value ({_k})",
+                        "source": "Info.plist",
+                        "masked": f"({len(_v)} chars)",
+                    })
+    _jb_sources = {"باینری اصلی": _main_strings}
+    result["jailbreak_artifacts"] = find_jailbreak_artifacts(_jb_sources)
+
     # Embedded .dylib files — each analysed separately (never skipped silently)
     dylib_paths = sorted(p for p in app_dir.rglob("*.dylib") if p.is_file())[:50]
     dylib_analysis = [analyze_dylib(p, app_dir) for p in dylib_paths]
@@ -1105,12 +1738,58 @@ def scan_ipa(ipa_path, workdir):
     result["dylib_count"] = len(dylib_analysis)
     result["dylib_suspicious_count"] = sum(len(d.get("suspicious", [])) for d in dylib_analysis)
 
-    # URLs / domains: bundle files + (decrypted) binary strings, merged
-    urls, domains, http_urls = scan_bundle_files(app_dir)
+    # .deb packages inside the IPA (v4) — analysed separately
+    deb_paths = sorted({p for p in root.rglob("*.deb") if p.is_file()})[:20]
+    deb_packages = [analyze_deb(p, app_dir) for p in deb_paths]
+    result["deb_packages"] = deb_packages
+    result["deb_count"] = len(deb_packages)
+
+    # Jailbreak artifacts inside dylib strings too (dyld-image check).
+    _jb_dylib_sources = {}
+    for _d in dylib_analysis:
+        if _d.get("unavailable") or not _d.get("is_macho"):
+            continue
+        try:
+            _dp = app_dir / _d["path"]
+            if _dp.is_file():
+                _jb_dylib_sources[f"dylib {_d['name']}"] = extract_strings(
+                    _dp.read_bytes()[:MAX_SCAN_BYTES])
+        except Exception:
+            pass
+    if _jb_dylib_sources:
+        _jb_sources.update(_jb_dylib_sources)
+        result["jailbreak_artifacts"] = find_jailbreak_artifacts(_jb_sources)
+        # Secrets / weak crypto inside dylibs as well (values never stored).
+        for _src, _strs in _jb_dylib_sources.items():
+            result["hardcoded_secrets"].extend(scan_secrets(_strs, _src))
+            for _hit in scan_weak_crypto(_strs):
+                _hit = dict(_hit, source=_src)
+                if _hit not in result["weak_crypto"]:
+                    result["weak_crypto"].append(_hit)
+
+    # Substrate loader files anywhere in the bundle (tampering signal)
+    substrate_files = sorted(
+        str(p.relative_to(app_dir)) for p in app_dir.rglob("*")
+        if p.is_file() and ("MobileSubstrate" in str(p) or "CydiaSubstrate" in str(p)))
+
+    # URLs / domains: bundle files + (decrypted) binary strings, merged.
+    # v4: only real network URLs count; namespace/docs strings are kept
+    # separately in result["ignored_urls"] and never add risk.
+    urls, domains, http_urls, ignored = scan_bundle_files(app_dir)
+    ignored_urls = list(ignored)
+    # Original app's own network domains (bundle + main binary only,
+    # excluding dylibs) — used to judge whether a tweak dylib talks to
+    # a server the original app never talks to.
+    _orig_urls, _orig_domains, _orig_http = set(urls), set(domains), set(http_urls)
     if bin_strings and not bin_strings.get("unavailable"):
         urls = sorted(set(urls) | set(bin_strings.get("urls", [])))
         domains = sorted(set(domains) | set(bin_strings.get("domains", [])))
         http_urls = sorted(set(http_urls) | set(bin_strings.get("insecure_http_urls", [])))
+        _orig_urls |= set(bin_strings.get("urls", []))
+        _orig_domains |= set(bin_strings.get("domains", []))
+        _orig_http |= set(bin_strings.get("insecure_http_urls", []))
+        ignored_urls.extend(bin_strings.get("ignored_urls", []))
+    result["_original_domains"] = sorted(_orig_domains)
     for d in dylib_analysis:
         if not d.get("unavailable"):
             urls = sorted(set(urls) | set(d.get("urls", [])))
@@ -1120,87 +1799,217 @@ def scan_ipa(ipa_path, workdir):
     result["url_count"] = len(urls)
     result["domains"] = domains
     result["insecure_http_urls"] = http_urls
+    # De-duplicate the ignored list (same namespace URL can appear in
+    # many files) and keep only the reason + a short sample.
+    seen_ign, ignored_dedup = set(), []
+    for item in ignored_urls:
+        key = (item.get("url"), item.get("reason"))
+        if key not in seen_ign:
+            seen_ign.add(key)
+            ignored_dedup.append(item)
+    result["ignored_urls"] = ignored_dedup[:50]
+    result["ignored_url_count"] = len(ignored_dedup)
+    result["ignored_domains"] = sorted({urlparse(i["url"]).hostname
+                                        for i in ignored_dedup
+                                        if urlparse(i["url"]).hostname})
     pm_for_domains = result.get("privacy_manifest") or {}
     result["domain_analysis"] = analyze_domains(
         domains, http_urls, pm_for_domains.get("tracking_domains", []))
 
-    # ---- Risk score v2: granular breakdown, 0-100 ----
+    # Third-party tampering verdict (v4) — before risk scoring, so the
+    # risk breakdown can attribute tweak findings to the tweak.
+    result["tampering"] = detect_tampering(
+        result, dylib_analysis, deb_packages, substrate_files)
+    # Jailbreak/substrate artifact strings are weaker evidence than an
+    # injected dylib: they join the evidence list but do not by
+    # themselves flip the verdict.
+    for _art in result.get("jailbreak_artifacts", []):
+        result["tampering"]["evidence"].append(
+            f"نشانه‌ی جیلبریک/توئیک در رشته‌ها ({_art['source']}): {_art['marker']}")
+
+    # ---- Risk score v4: calm and accurate, never inflated ----
+    # The v3 score summed every signal with no ceiling, so a normal
+    # App Store app with ad-driven permissions + standard analytics
+    # + namespace-URL false positives hit 100/100 and scared users
+    # for no reason. v4 recalibrates:
+    #  * each signal is worth less on its own (e.g. ATS arbitrary loads
+    #    25 -> 10; a single permission at most 4 points),
+    #  * location permissions are de-duplicated (only the strongest
+    #    location key counts — the deprecated NSLocationUsageDescription
+    #    no longer double-counts the same access),
+    #  * a sensitive manifest data type only adds points when it is
+    #    linked to the user's identity or used for tracking — a
+    #    functionality-only, unlinked Photos/Videos entry (normal for
+    #    a PDF editor) adds nothing,
+    #  * every category has a cap, so one noisy category cannot push
+    #    the score to 100 by itself. Caps: network 20, permissions 15,
+    #    privacy 15, code 12, tweak 25 (maximum possible score: 87).
+    # The breakdown lists the points actually counted, per category.
+    CATEGORY_CAPS = {"network": 20, "permissions": 15, "privacy": 15,
+                     "code": 12, "tweak": 25}
+    cat_used = {k: 0 for k in CATEGORY_CAPS}
     score, breakdown = 0, []
-    def add(points, reason):
+
+    def add(points, reason, source="original", category="code",
+            masvs=None, confidence="medium"):
         nonlocal score
-        score += points
-        breakdown.append({"points": points, "reason": reason})
+        cap = CATEGORY_CAPS.get(category, 12)
+        counted = max(0, min(points, cap - cat_used.get(category, 0)))
+        if counted <= 0:
+            return
+        cat_used[category] = cat_used.get(category, 0) + counted
+        score += counted
+        breakdown.append({"points": counted, "reason": reason,
+                          "source": source, "category": category,
+                          "masvs": masvs or MASVS_BY_CATEGORY.get(category, "MASVS-CODE"),
+                          "confidence": confidence})
     if result["ats"]["allows_arbitrary_loads"]:
-        add(25, "NSAllowsArbitraryLoads فعال است — ترافیک رمزنگاری‌نشده مجاز است")
+        add(10, "NSAllowsArbitraryLoads فعال است — ترافیک رمزنگاری‌نشده مجاز است",
+            category="network")
     if result["ats"]["allows_arbitrary_loads_for_media"]:
-        add(5, "NSAllowsArbitraryLoadsForMedia فعال است")
+        add(3, "NSAllowsArbitraryLoadsForMedia فعال است", category="network")
     if http_urls:
-        add(15, f"{len(http_urls)} آدرس http:// ناامن پیدا شد")
+        add(min(9, 3 * len(http_urls)),
+            f"{len(http_urls)} آدرس http:// ناامن (واقعی) پیدا شد", category="network")
     if result["ats"]["exception_domains"]:
-        add(5, f"دامنه‌های استثنا در ATS: {', '.join(result['ats']['exception_domains'])}")
+        add(3, f"دامنه‌های استثنا در ATS: {', '.join(result['ats']['exception_domains'])}",
+            category="network")
+    # Permissions: de-duplicate location (strongest key only) and cap.
+    LOCATION_KEYS = {"NSLocationUsageDescription",
+                     "NSLocationWhenInUseUsageDescription",
+                     "NSLocationAlwaysUsageDescription",
+                     "NSLocationAlwaysAndWhenInUseUsageDescription",
+                     "NSLocationTemporaryUsageDescriptionDictionary"}
+    loc_perms = [p for p in perms if p["key"] in LOCATION_KEYS]
+    keep_loc = max(loc_perms, key=lambda p: p["risk"])["key"] if loc_perms else None
     for p in perms:
+        if p["key"] in LOCATION_KEYS and p["key"] != keep_loc:
+            continue  # same access, already counted under the strongest key
         if p["risk"] >= 9:
-            add(8, f"دسترسی حساس: {p['label_fa']} ({p['label_en']})")
+            add(4, f"دسترسی حساس: {p['label_fa']} ({p['label_en']})",
+                category="permissions")
         elif p["risk"] >= 7:
-            add(5, f"دسترسی پرریسک: {p['label_fa']} ({p['label_en']})")
+            add(3, f"دسترسی پرریسک: {p['label_fa']} ({p['label_en']})",
+                category="permissions")
+        elif p["risk"] >= 5:
+            add(2, f"دسترسی: {p['label_fa']} ({p['label_en']})",
+                category="permissions")
     pm = result["privacy_manifest"]
     if pm and not pm.get("error"):
         if pm.get("tracking"):
-            add(10, "مانیفست حریم خصوصی: NSPrivacyTracking = true (ردیابی کاربر)")
+            add(5, "مانیفست حریم خصوصی: NSPrivacyTracking = true (ردیابی کاربر)",
+                category="privacy")
         if pm.get("tracking_domains"):
-            add(8, f"دامنه‌های ردیابی در مانیفست: {', '.join(pm['tracking_domains'][:5])}")
+            add(4, f"دامنه‌های ردیابی در مانیفست: {', '.join(pm['tracking_domains'][:5])}",
+                category="privacy")
         tracking_types = [c for c in pm.get("collected_data_types", []) if c.get("tracking")]
         if tracking_types:
-            add(10, f"{len(tracking_types)} نوع داده‌ی جمع‌آوری‌شده با ردیابی مرتبط است")
+            add(5, f"{len(tracking_types)} نوع داده‌ی جمع‌آوری‌شده با ردیابی مرتبط است",
+                category="privacy")
         linked_types = [c for c in pm.get("collected_data_types", []) if c.get("linked")]
         if linked_types:
-            add(5, f"{len(linked_types)} نوع داده‌ی جمع‌آوری‌شده به هویت کاربر متصل است")
+            add(3, f"{len(linked_types)} نوع داده‌ی جمع‌آوری‌شده به هویت کاربر متصل است",
+                category="privacy")
     if dedup:
-        add(min(15, 5 * len(dedup)), f"{len(dedup)} ترکر/SDK شناخته‌شده: {', '.join(t['tracker'] for t in dedup)}")
+        add(min(10, 5 * len(dedup)),
+            f"{len(dedup)} ترکر/SDK شناخته‌شده: {', '.join(t['tracker'] for t in dedup)}",
+            category="privacy")
     if ent.get("get-task-allow") is True:
-        add(10, "get-task-allow = true — باینری قابل دیباگ است (نسخه‌ی توسعه، نه انتشار)")
+        add(8, "get-task-allow = true — باینری قابل دیباگ است (نسخه‌ی توسعه، نه انتشار)",
+            category="code")
     for f in result.get("entitlement_findings", []):
         if f["points"] > 0 and f["key"] != "get-task-allow":
-            add(f["points"], f"Entitlement حساس: {f['label_fa']} (`{f['key']}`)")
+            add(f["points"], f"Entitlement حساس: {f['label_fa']} (`{f['key']}`)",
+                category="code")
     if pm and not pm.get("error"):
+        # Only sensitive types that are linked to identity or used for
+        # tracking add points. A functionality-only, unlinked entry
+        # (e.g. Photos/Videos in a PDF editor) is normal, not a risk.
         sensitive_types = [c for c in pm.get("collected_data_types", [])
-                           if c.get("risk_points", 0) >= 8]
+                           if c.get("risk_points", 0) >= 8
+                           and (c.get("linked") or c.get("tracking"))]
         if sensitive_types:
-            add(8, "مانیفست داده‌ی حساس جمع می‌کند: " +
-                "، ".join(c.get("sensitive") or c.get("type", "?") for c in sensitive_types[:4]))
+            add(5, "مانیفست داده‌ی حساس جمع می‌کند (متصل به هویت یا با ردیابی): " +
+                "، ".join(c.get("sensitive") or c.get("type", "?") for c in sensitive_types[:4]),
+                category="privacy")
     for domain_entry in result.get("domain_analysis", []):
         if domain_entry.get("is_tracker_domain"):
-            add(3, f"دامنه ترکر/تبلیغات: {domain_entry['domain']}")
+            add(2, f"دامنه ترکر/تبلیغات: {domain_entry['domain']}",
+                category="privacy")
     insecure_exc = [d for d, cfg in result["ats"].get("exception_domain_details", {}).items()
                     if cfg.get("allows_insecure_http")]
     if insecure_exc:
-        add(5, f"ATS برای این دامنه‌ها http ناامن را مجاز می‌کند: {', '.join(insecure_exc)}")
+        add(3, f"ATS برای این دامنه‌ها http ناامن را مجاز می‌کند: {', '.join(insecure_exc)}",
+            category="network")
     plist_sec = result.get("plist_security", {})
     if plist_sec.get("background_location"):
-        add(6, "حالت پس‌زمینه location فعال است — ردیابی موقعیت در پس‌زمینه")
+        add(3, "حالت پس‌زمینه location فعال است — ردیابی موقعیت در پس‌زمینه",
+            category="code")
     if plist_sec.get("file_sharing_enabled"):
-        add(4, "UIFileSharingEnabled فعال است — فایل‌های برنامه از طریق iTunes قابل دسترسی‌اند")
+        add(2, "UIFileSharingEnabled فعال است — فایل‌های برنامه از طریق iTunes قابل دسترسی‌اند",
+            category="code")
     if plist_sec.get("bonjour_services"):
-        add(3, f"سرویس‌های Bonjour (شبکه محلی): {', '.join(plist_sec['bonjour_services'][:4])}")
+        add(2, f"سرویس‌های Bonjour (شبکه محلی): {', '.join(plist_sec['bonjour_services'][:4])}",
+            category="code")
     if bin_strings and not bin_strings.get("unavailable"):
         for hit in bin_strings.get("suspicious", []):
-            add(hit["points"], f"الگوی مشکوک در باینری: {hit['label_fa']} ({hit['matches']} مورد)")
+            add(hit["points"], f"الگوی مشکوک در باینری: {hit['label_fa']} ({hit['matches']} مورد)",
+                category="code")
+    # MobSF-style: hardcoded secrets, weak crypto, missing binary protections.
+    for sec in result.get("hardcoded_secrets", []):
+        add(8, f"رمز/توکن سخت‌کدشده در باندل: {sec['type_fa']} ({sec['source']})",
+            category="code", masvs="MASVS-STORAGE", confidence="high")
+    for wc in result.get("weak_crypto", []):
+        add(wc["points"], f"{wc['label_fa']} ({wc.get('source', 'باینری اصلی')}) — "
+            "وجود رشته به‌تنهایی به معنی استفاده نیست",
+            category="code", masvs="MASVS-CRYPTO", confidence="low")
+    prot = result.get("binary_protections") or {}
+    if prot.get("available"):
+        if not prot.get("pie"):
+            add(3, "باینری PIE نیست (Position Independent Executable فعال نیست)",
+                category="code", masvs="MASVS-CODE", confidence="medium")
+        if not prot.get("stack_canary"):
+            add(2, "نشانه‌ی Stack Canary در باینری پیدا نشد",
+                category="code", masvs="MASVS-CODE", confidence="low")
+    tamp = result.get("tampering") or {}
+    injected_names = {d["name"] for d in tamp.get("injected_dylibs", [])}
+    if tamp.get("tampered"):
+        add(8, f"دستکاری شخص ثالث: {tamp.get('injected_dylib_count', 0)} dylib تزریقی "
+                 "(MobileSubstrate) در باندل است", source="tweak", category="tweak",
+            confidence="high")
     for d in dylib_analysis:
+        d_source = "tweak" if d.get("name") in injected_names else "original"
+        d_category = "tweak" if d_source == "tweak" else "code"
         for hit in d.get("suspicious", []):
-            add(hit["points"], f"الگوی مشکوک در dylib {d['name']}: {hit['label_fa']} ({hit['matches']} مورد)")
+            add(hit["points"], f"الگوی مشکوک در dylib {d['name']}: {hit['label_fa']} ({hit['matches']} مورد)",
+                source=d_source, category=d_category)
         if d.get("tracker"):
-            add(5, f"dylib ترکر: {d['name']} → {d['tracker']}")
+            add(5, f"dylib ترکر: {d['name']} → {d['tracker']}",
+                source=d_source, category=d_category)
+    for p in deb_packages:
+        if p.get("is_tweak"):
+            add(8, f"بسته‌ی .deb توئیک: {p.get('package') or p['name']} "
+                     "(فایل‌های آن زیر Library/MobileSubstrate است)",
+                source="tweak", category="tweak")
     if not code_sig:
-        add(5, "امضای کد پیدا نشد")
+        add(3, "امضای کد پیدا نشد", category="code")
     if binary.get("encrypted") is True:
-        breakdown.append({"points": 0, "reason": "باینری رمزگذاری‌شده (FairPlay) است — تحلیل کامل باینری بدون نسخه‌ی رمزگشایی‌شده ممکن نیست"})
+        breakdown.append({"points": 0, "source": "original", "category": "code",
+                          "reason": "باینری رمزگذاری‌شده (FairPlay) است — تحلیل کامل باینری بدون نسخه‌ی رمزگشایی‌شده ممکن نیست"})
     elif binary.get("encrypted") is False:
-        breakdown.append({"points": 0, "reason": "باینری رمزگذاری نشده — تحلیل رشته‌ها انجام شد"})
+        breakdown.append({"points": 0, "source": "original", "category": "code",
+                          "reason": "باینری رمزگذاری نشده — تحلیل رشته‌ها انجام شد"})
     score = min(100, score)
-    level = "کم" if score < 25 else ("متوسط" if score < 55 else "بالا")
+    level = "کم" if score < 30 else ("متوسط" if score < 60 else "بالا")
+    original_points = sum(b.get("points", 0) for b in breakdown if b.get("source") != "tweak")
+    tweak_points = sum(b.get("points", 0) for b in breakdown if b.get("source") == "tweak")
     result["risk"] = {"score": score, "level_fa": level,
-                      "level_en": "low" if score < 25 else ("medium" if score < 55 else "high"),
+                      "level_en": "low" if score < 30 else ("medium" if score < 60 else "high"),
                       "breakdown": breakdown,
+                      "category_points": dict(cat_used),
+                      "category_caps": dict(CATEGORY_CAPS),
+                      "original_points": original_points,
+                      "tweak_points": tweak_points,
                       "reasons": [b["reason"] for b in breakdown]}
 
     # ---- Per-finding severity list (v3) ----
@@ -1209,23 +2018,49 @@ def scan_ipa(ipa_path, workdir):
         if b.get("points", 0) > 0:
             findings.append({"severity": severity_for_points(b["points"]),
                              "category": "risk", "title_fa": b["reason"],
-                             "points": b["points"]})
+                             "points": b["points"],
+                             "masvs": b.get("masvs", "MASVS-CODE"),
+                             "confidence": b.get("confidence", "medium")})
     for d in dylib_analysis:
         if d.get("unavailable"):
             findings.append({"severity": "info", "category": "dylib",
-                             "title_fa": f"dylib {d['name']}: {d['unavailable']}", "points": 0})
+                             "title_fa": f"dylib {d['name']}: {d['unavailable']}", "points": 0,
+                             "masvs": "MASVS-RESILIENCE", "confidence": "high"})
     if not (pm and not pm.get("error")) and result.get("privacy_manifest") is None:
         findings.append({"severity": "medium", "category": "privacy-manifest",
-                         "title_fa": "مانیفست حریم خصوصی (PrivacyInfo.xcprivacy) در باندل نیست", "points": 0})
+                         "title_fa": "مانیفست حریم خصوصی (PrivacyInfo.xcprivacy) در باندل نیست", "points": 0,
+                         "masvs": "MASVS-PRIVACY", "confidence": "high"})
     if result.get("provisioning") and result["provisioning"].get("expired"):
         findings.append({"severity": "high", "category": "provisioning",
-                         "title_fa": "پروفایل provisioning منقضی شده است", "points": 0})
+                         "title_fa": "پروفایل provisioning منقضی شده است", "points": 0,
+                         "masvs": "MASVS-PLATFORM", "confidence": "high"})
     result["findings"] = sorted(
         findings,
         key=lambda f: {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}[f["severity"]])
 
-    # ---- Answers to the four privacy questions (Picsart-style) ----
+    # ---- MASVS coverage (OWASP MASVS 2.x) ----
+    _checked = {b.get("masvs") for b in breakdown if b.get("masvs")}
+    if result.get("hardcoded_secrets") is not None and not binary.get("encrypted"):
+        _checked.add("MASVS-STORAGE")
+    if result.get("weak_crypto") is not None and not binary.get("encrypted"):
+        _checked.add("MASVS-CRYPTO")
+    if result.get("privacy_manifest") is not None:
+        _checked.add("MASVS-PRIVACY")
+    result["masvs_coverage"] = {
+        "checked": sorted(_checked),
+        "dynamic_only": [
+            "MASVS-NETWORK — رفتار واقعی TLS و certificate pinning فقط با تست زمان اجرا",
+            "MASVS-AUTH — بررسی‌های سمت سرور (توکن، نشست) فقط با تست زمان اجرا",
+            "MASVS-RESILIENCE — ضد دستکاری و ضد دیباگ در زمان اجرا فقط با تست زمان اجرا",
+        ],
+        "note": ("تحلیل ایستا خودکار راهنماست، نه حکم قطعی (OWASP MASTG): "
+                 "خروجی می‌تواند مثبت کاذب و منفی کاذب داشته باشد. هر یافته "
+                 "یک سطح اطمینان دارد؛ یافته‌های با اطمینان پایین فقط نشانه‌اند، نه اثبات."),
+    }
+
+    # ---- Answers to the privacy questions (Picsart-style + tampering) ----
     result["privacy_answers"] = build_privacy_answers(result)
+    result.pop("_original_domains", None)
     return result
 
 def render_report(r):
@@ -1235,15 +2070,129 @@ def render_report(r):
     L.append("")
     L.append(f"- فایل: `{r['file']}`")
     L.append(f"- SHA-256: `{r.get('sha256','')}`")
+    L.append(f"- MD5: `{r.get('md5','')}` — SHA-1: `{r.get('sha1','')}`")
     L.append(f"- اندازه فایل: {r.get('size_bytes',0):,} بایت")
     L.append(f"- Bundle ID: `{ident.get('bundle_id')}` | نسخه: {ident.get('version')} (build {ident.get('build')}) | حداقل iOS: {ident.get('minimum_os')}")
     sb = r.get("size_breakdown", {})
     L.append(f"- حجم باندل: {sb.get('total_bytes',0):,} بایت (باینری: {sb.get('binary_bytes','—')}، فریم‌ورک‌ها: {sb.get('frameworks_bytes',0):,} بایت)")
     if r.get("risk"):
         L.append(f"- **ریسک کلی: {r['risk']['score']}/100 — {r['risk']['level_fa']}**")
+        L.append(f"  - ریسک برنامه‌ی اصلی: {r['risk'].get('original_points', '?')} — "
+                 f"ریسک توئیک/تزریقی: {r['risk'].get('tweak_points', '?')}")
         for b in r["risk"]["breakdown"]:
-            L.append(f"  - (+{b['points']}) {b['reason']}")
+            tag = " [توئیک]" if b.get("source") == "tweak" else ""
+            L.append(f"  - (+{b['points']}) {b['reason']}{tag}")
     L.append("")
+    # ---- Third-party tampering verdict (v4, the user's main question) ----
+    tamp = r.get("tampering") or {}
+    L.append("## دستکاری شخص ثالث / توئیک")
+    L.append(f"**حکم: {tamp.get('verdict_fa', '—')}**")
+    for ev in tamp.get("evidence", []):
+        L.append(f"- {ev}")
+    if tamp.get("injected_dylibs"):
+        L.append("")
+        L.append("### dylibهای تزریقی — هر کدام جدا")
+        for d in tamp["injected_dylibs"]:
+            L.append(f"#### `{d['path']}` — {d.get('size_bytes', 0):,} بایت (ریسک {d.get('risk_points', 0)})")
+            for reason in d.get("reasons_fa", []):
+                L.append(f"- چرا تزریقی است: {reason}")
+            for h in d.get("suspicious", []):
+                L.append(f"- ⚠️ {h['label_fa']} ({h['label_en']}) — {h['matches']} مورد — (+{h['points']})")
+            if d.get("domains"):
+                L.append(f"- دامنه‌های این dylib: {', '.join(d['domains'])}")
+            else:
+                L.append("- دامنه/سروری در رشته‌های این dylib پیدا نشد.")
+            if d.get("insecure_http_urls"):
+                L.append(f"- لینک ناامن http در این dylib: {', '.join(d['insecure_http_urls'][:5])}")
+            if d.get("unavailable"):
+                L.append(f"- ⚠️ در دسترس نیست: {d['unavailable']}")
+    if tamp.get("unknown_tweak_servers"):
+        L.append(f"- ⚠️ سرورهای ناشناخته‌ی توئیک: {', '.join(tamp['unknown_tweak_servers'])}")
+    else:
+        L.append(f"- {tamp.get('server_note_fa', '')}")
+    if tamp.get("tweak_deb_packages"):
+        L.append(f"- بسته‌های .deb توئیک: {', '.join(tamp['tweak_deb_packages'])}")
+    for lim in tamp.get("limits", []):
+        L.append(f"- ⚠️ محدودیت: {lim}")
+    L.append("")
+    # ---- .deb packages (v4) ----
+    L.append(f"## بسته‌های .deb — {r.get('deb_count', 0)} مورد")
+    if not r.get("deb_packages"):
+        L.append("- هیچ فایل .deb در باندل پیدا نشد.")
+    for p in r.get("deb_packages", []):
+        L.append(f"### `{p['path']}` — {p.get('size_bytes', 0):,} بایت")
+        if p.get("unavailable"):
+            L.append(f"- ⚠️ در دسترس نیست: {p['unavailable']}")
+            continue
+        L.append(f"- بسته: `{p.get('package') or '—'}` — نسخه: {p.get('version') or '—'} — "
+                 f"معماری: {p.get('architecture') or '—'}")
+        L.append(f"- نگهدارنده (Maintainer): {p.get('maintainer') or '—'}")
+        if p.get("description"):
+            L.append(f"- توضیح: {p['description']}")
+        if p.get("depends"):
+            L.append(f"- وابستگی‌ها: {p['depends']}")
+        L.append(f"- توئیک (MobileSubstrate): {'بله' if p.get('is_tweak') else 'خیر'}")
+        if p.get("dylib_files"):
+            L.append(f"- فایل‌های dylib داخل بسته: {', '.join(p['dylib_files'][:10])}")
+        if p.get("files"):
+            L.append(f"- فایل‌های داخل بسته ({len(p['files'])}): {', '.join(p['files'][:15])}"
+                     + ("…" if len(p['files']) > 15 else ""))
+        for name, body in (p.get("scripts") or {}).items():
+            first = body.strip().splitlines()[0] if body.strip() else ""
+            L.append(f"- اسکریپت `{name}`: {first[:200]}")
+    L.append("")
+    # ---- Methodology & standards (MobSF / OWASP MASVS) ----
+    L.append("## روش‌شناسی و استانداردها")
+    L.append("روش اسکن از شیوه‌های استاندارد تحلیل ایستای iOS پیروی می‌کند: "
+             "اسکن باینری MobSF (دسترسی‌ها، امضا، ATS، محافظت‌های باینری، "
+             "رمزهای سخت‌کدشده، ترکرها) و دسته‌بندی OWASP MASVS/MASTG.")
+    cov = r.get("masvs_coverage") or {}
+    if cov.get("checked"):
+        L.append(f"- دسته‌های MASVS بررسی‌شده: {', '.join(cov['checked'])}")
+    for d in cov.get("dynamic_only", []):
+        L.append(f"- فقط با تست زمان اجرا: {d}")
+    if cov.get("note"):
+        L.append(f"- ⚠️ {cov['note']}")
+    L.append("- امتیاز ریسک سقف دارد: هر دسته (شبکه ۲۰، دسترسی ۱۵، حریم خصوصی ۱۵، "
+             "کد ۱۲، توئیک ۲۵) جداگانه محدود می‌شود تا یک دسته‌ی پر سر و صدا "
+             "به‌تنهایی امتیاز را به ۱۰۰ نرساند. حداکثر امتیاز ممکن ۸۷ است.")
+    L.append("")
+    L.append(f"## خانواده‌ی ران‌تایم: {r.get('runtime_family') or '—'}")
+    if r.get("app_extension_details"):
+        L.append("")
+        L.append(f"## اکستنشن‌های برنامه ({len(r['app_extension_details'])}) — هر کدام پروسس جداگانه")
+        for ex in r["app_extension_details"]:
+            perms_txt = ", ".join(p["label_fa"] for p in ex.get("permissions", [])) or "بدون دسترسی حساس"
+            L.append(f"- `{ex['name']}` — bundle: `{ex.get('bundle_id') or '—'}` — "
+                     f"دسترسی‌ها: {perms_txt} — امضای کد: {ex.get('has_code_signature')}")
+    prot = r.get("binary_protections") or {}
+    if prot.get("available"):
+        L.append("")
+        L.append("## محافظت‌های باینری (PIE / Stack Canary / ARC)")
+        L.append(f"- PIE (Position Independent Executable): {'بله' if prot.get('pie') else 'خیر — در بیلد انتشار غیرعادی است'}")
+        L.append(f"- Stack Canary: {'بله' if prot.get('stack_canary') else 'پیدا نشد'}")
+        L.append(f"- ARC: {'بله' if prot.get('arc') else 'پیدا نشد'}")
+        if prot.get("note"):
+            L.append(f"- {prot['note']}")
+    secrets = r.get("hardcoded_secrets", []) or []
+    L.append("")
+    L.append(f"## رمزها و توکن‌های سخت‌کدشده — {len(secrets)} مورد")
+    if not secrets:
+        L.append("- هیچ توکن/کلید شناخته‌شده‌ای در رشته‌ها و مقادیر plist پیدا نشد. "
+                 "(مقدار رمزها هرگز در گزارش چاپ نمی‌شود؛ فقط نوع و محل آن‌ها.)")
+    for s in secrets:
+        L.append(f"- ⚠️ {s['type_fa']} — محل: {s['source']} — نمونه‌ی مخفی‌شده: `{s['masked']}`")
+    wc = r.get("weak_crypto", []) or []
+    if wc:
+        L.append("")
+        L.append("## رمزنگاری ضعیف (وجود رشته ≠ استفاده)")
+        for h in wc:
+            L.append(f"- {h['label_fa']} ({h.get('source', 'باینری اصلی')}) — {h['matches']} مورد")
+    if r.get("jailbreak_artifacts"):
+        L.append("")
+        L.append("## نشانه‌های جیلبریک/توئیک در رشته‌ها")
+        for a in r["jailbreak_artifacts"]:
+            L.append(f"- `{a['marker']}` — منبع: {a['source']}")
     if r.get("privacy_answers"):
         L.append("## پاسخ به سؤال‌های حریم خصوصی")
         L.append("")
@@ -1405,9 +2354,17 @@ def render_report(r):
             L.append(f"- {d}")
     if r.get("insecure_http_urls"):
         L.append("")
-        L.append("### ⚠️ URLهای ناامن http://")
+        L.append("### ⚠️ URLهای ناامن http:// (فقط آدرس‌های واقعی شبکه)")
         for u in r["insecure_http_urls"][:20]:
             L.append(f"- {u}")
+    if r.get("ignored_urls"):
+        L.append("")
+        L.append(f"### رشته‌های URL نادیده‌گرفته‌شده ({r.get('ignored_url_count', 0)} مورد — در ریسک حساب نمی‌شوند)")
+        L.append("این‌ها فضای نام XML/XMP/SVG یا رشته‌های مستندات‌اند، نه آدرس شبکه‌ای که برنامه صدا بزند:")
+        for item in r["ignored_urls"][:15]:
+            L.append(f"- `{item['url'][:120]}` — دلیل: {item['reason']}")
+        if r.get("ignored_domains"):
+            L.append(f"- دامنه‌های نادیده‌گرفته‌شده: {', '.join(r['ignored_domains'][:20])}")
     L.append("")
     L.append(f"## Entitlements ({len(r.get('entitlement_keys',[]))})")
     for k in r.get("entitlement_keys", []):
@@ -1436,7 +2393,7 @@ def render_report(r):
     return "\n".join(L) + "\n"
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="SibStar IPA scanner v3 (deep scan)")
+    ap = argparse.ArgumentParser(description="SibStar IPA scanner v4 (deep scan)")
     ap.add_argument("ipa", help="Path to .ipa file")
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument("--report", dest="report_out", default=None)

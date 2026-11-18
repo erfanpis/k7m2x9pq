@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""SibStar IPA Scanner — PNG summary card (v3).
+"""SibStar IPA Scanner — PNG summary card (v4, redesigned).
 
-Generates a polished, readable PNG report card for one scan result:
-app name, bundle ID, version, risk score 0-100 with a clear colour
-(green / amber / red), risk level in Persian, the four privacy-question
-verdicts, key counts (permissions, trackers, domains, insecure links,
-dylibs, suspicious patterns) and the top findings.
+A clean, professional summary card for one scan result: app name,
+bundle ID, version, risk score 0-100 in a calm colour (green / amber /
+muted red — never red-everywhere), the tampering verdict in a soft
+banner, the original-vs-tweak risk split, key counts, the five privacy
+answers in plain language, and the top findings.
 
-Persian text is drawn right-aligned. When Pillow has libraqm (the usual
-case, including the official wheels) the raw Persian text is drawn and
-raqm shapes it; when raqm is missing, arabic-reshaper + python-bidi shape
-it first. DejaVu Sans is used because it covers Arabic script as well as
-Latin letters, digits and punctuation (—, •, /) in one font, so mixed
-Persian+Latin lines never turn into tofu boxes.
+Design rules (v4 redesign, after the v3 card was judged unprofessional):
+- White card on a soft grey background, one dark-slate header band.
+- Generous spacing; every block is laid out from a running y cursor,
+  so nothing overlaps or clips.
+- Persian text is drawn right-aligned. When Pillow has libraqm (the
+  usual case, including the official wheels) the raw Persian text is
+  drawn and raqm shapes it; when raqm is missing, arabic-reshaper +
+  python-bidi shape it first. DejaVu Sans covers Arabic script as
+  well as Latin letters, digits and punctuation in one font, so mixed
+  Persian+Latin lines never turn into tofu boxes.
 
 Usage:
   python3 report_card.py test/TestGame.ipa --out /tmp/card.png
@@ -70,14 +74,15 @@ def is_persian(text):
 
 VERDICT_FA = {
     "yes": "بله", "possible": "ممکن است", "no-evidence": "شواهدی نیست",
-    "unknown": "نامشخص", "partial": "بررسی ناقص", "risky": "پرخطر",
-    "caution": "احتیاط", "ok": "کم‌ریسک",
+    "unknown": "نامشخص", "partial": "بررسی ناقص", "risky": "بالا",
+    "caution": "متوسط", "ok": "کم‌ریسک",
 }
 
+# Calm palette: the score circle is the only strongly coloured element.
 RISK_COLORS = {
-    "low": (22, 163, 74),      # green
-    "medium": (217, 119, 6),   # amber
-    "high": (220, 38, 38),     # red
+    "low": (21, 128, 61),      # calm green
+    "medium": (180, 83, 9),    # calm amber
+    "high": (185, 28, 28),     # muted red (not bright alarm red)
 }
 RISK_DARK = {"low": (20, 83, 45), "medium": (120, 53, 15), "high": (127, 29, 29)}
 
@@ -140,23 +145,21 @@ def wrap_text(draw, text, font, max_width):
 def draw_rtl(draw, x_right, y, text, font, fill):
     """Draw one line right-aligned (Persian) or left-aligned (Latin)."""
     shaped = fa(text)
-    if is_persian(text):
-        draw.text((x_right, y), shaped, font=font, fill=fill, anchor="ra")
-    else:
-        draw.text((x_right, y), shaped, font=font, fill=fill, anchor="ra")
-    return y + int(font.size * 1.35)
+    draw.text((x_right, y), shaped, font=font, fill=fill, anchor="ra")
+    return y + int(font.size * 1.4)
 
 
 def generate_report_card(result, out_path):
     """Render the summary card PNG for a scan result dict. Returns out_path."""
     out_path = Path(out_path)
-    W, H = 1200, 1180
+    W, H = 1200, 1320
     M = 64  # margin
-    BG = (238, 241, 245)
+    BG = (244, 245, 247)
     CARD = (255, 255, 255)
     INK = (17, 24, 39)
     MUTED = (107, 114, 128)
     LINE = (229, 231, 235)
+    HEADER = (31, 41, 55)  # dark slate, not red
 
     risk = result.get("risk", {}) or {}
     score = int(risk.get("score", 0) or 0)
@@ -169,125 +172,154 @@ def generate_report_card(result, out_path):
     bundle = ident.get("bundle_id") or "—"
     version = ident.get("version") or "—"
     min_os = ident.get("minimum_os") or "—"
-    sdk = (result.get("sdk_info", {}) or {}).get("sdk_name") or ""
     answers = {a["id"]: a for a in (result.get("privacy_answers", []) or [])}
     verdict = answers.get("verdict", {}) or {}
+    tamp = result.get("tampering") or {}
 
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img)
     # Card
     draw.rounded_rectangle([24, 24, W - 24, H - 24], radius=28, fill=CARD,
                            outline=LINE, width=2)
-    # Header band
-    draw.rounded_rectangle([24, 24, W - 24, 130], radius=28, fill=color)
-    draw.rectangle([24, 102, W - 24, 130], fill=color)
-    f_title = load_font(34, bold=True)
-    draw.text((W - M, 48), fa("سیب‌استار — گزارش اسکن IPA"), font=f_title,
+    # Header band (dark slate, calm)
+    draw.rounded_rectangle([24, 24, W - 24, 132], radius=28, fill=HEADER)
+    draw.rectangle([24, 104, W - 24, 132], fill=HEADER)
+    f_title = load_font(32, bold=True)
+    draw.text((W - M, 46), fa("سیب‌استار — گزارش اسکن IPA"), font=f_title,
               fill=(255, 255, 255), anchor="ra")
-    f_sub = load_font(24)
-    draw.text((W - M, 96), fa("SibStar IPA Scanner v3"), font=f_sub,
-              fill=(255, 255, 255), anchor="ra")
+    f_sub = load_font(23)
+    draw.text((W - M, 94), fa("SibStar IPA Scanner  •  تحلیل ایستا"),
+              font=f_sub, fill=(203, 213, 225), anchor="ra")
 
-    # App name + score circle
-    y = 170
-    f_name = load_font(46, bold=True)
-    for line in wrap_text(draw, name, f_name, W - 2 * M - 260):
-        y = draw_rtl(draw, W - M, y, line, f_name, INK)
-    f_meta = load_font(26)
-    meta = f"{bundle}  •  نسخه {version}  •  حداقل iOS {min_os}"
-    if sdk:
-        meta += f"  •  SDK {sdk}"
-    for line in wrap_text(draw, meta, f_meta, W - 2 * M - 260):
-        y = draw_rtl(draw, W - M, y, line, f_meta, MUTED)
-
-    # Score circle (top-right area is taken by the name; circle goes left)
-    cx, cy, r = 150, 250, 92
+    # Score circle (left) + app name/meta (right). The name column is
+    # width-limited so it can never run into the circle.
+    cx, cy, r = 152, 252, 88
     draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
-    f_score = load_font(64, bold=True)
-    draw.text((cx, cy - 8), str(score), font=f_score, fill=(255, 255, 255),
+    f_score = load_font(62, bold=True)
+    draw.text((cx, cy - 10), str(score), font=f_score, fill=(255, 255, 255),
               anchor="mm")
-    f_outof = load_font(22)
-    draw.text((cx, cy + 52), "/100", font=f_outof, fill=(255, 255, 255), anchor="mm")
-    f_level = load_font(30, bold=True)
-    draw.text((cx, cy + r + 34), fa(f"ریسک {level_fa}"), font=f_level,
+    f_outof = load_font(21)
+    draw.text((cx, cy + 50), "/100", font=f_outof, fill=(255, 255, 255), anchor="mm")
+    f_level = load_font(28, bold=True)
+    draw.text((cx, cy + r + 32), fa(f"ریسک {level_fa}"), font=f_level,
               fill=dark, anchor="mm")
 
-    # Verdict line
-    y = max(y, cy + r + 84) + 8
-    f_verdict = load_font(28, bold=True)
+    y = 176
+    f_name = load_font(42, bold=True)
+    for line in wrap_text(draw, name, f_name, W - 2 * M - 250):
+        y = draw_rtl(draw, W - M, y, line, f_name, INK)
+    f_meta = load_font(25)
+    meta = f"{bundle}  •  نسخه {version}  •  حداقل iOS {min_os}"
+    for line in wrap_text(draw, meta, f_meta, W - 2 * M - 250):
+        y = draw_rtl(draw, W - M, y, line, f_meta, MUTED)
+
+    # Everything below starts under both the name block and the circle.
+    y = max(y, cy + r + 78) + 10
+
+    # Tampering banner: soft amber if tampered, soft green if clean.
+    # Never a red background — the verdict is in plain words.
+    if tamp.get("tampered"):
+        banner_bg, banner_ink = (254, 243, 199), (146, 64, 14)
+        banner = (f"دستکاری شخص ثالث: بله — "
+                  f"{tamp.get('injected_dylib_count', 0)} dylib تزریقی "
+                  f"(MobileSubstrate)")
+    else:
+        banner_bg, banner_ink = (236, 253, 245), (6, 95, 70)
+        banner = "دستکاری شخص ثالث: پیدا نشد"
+    draw.rounded_rectangle([M, y, W - M, y + 62], radius=14, fill=banner_bg)
+    f_banner = load_font(27, bold=True)
+    for line in wrap_text(draw, banner, f_banner, W - 2 * M - 32):
+        draw_rtl(draw, W - M - 16, y + 14, line, f_banner, banner_ink)
+        y += 0  # single-line banner by design; wrapped lines stay inside
+    y += 62 + 14
+
+    # Risk split, plain language.
+    f_split = load_font(25)
+    split = (f"ریسک برنامه‌ی اصلی: {risk.get('original_points', '?')}  •  "
+             f"ریسک توئیک: {risk.get('tweak_points', '?')}")
+    y = draw_rtl(draw, W - M, y, split, f_split, MUTED)
+    y += 8
+    # Verdict line (plain language, not alarmist).
+    f_verdict = load_font(25, bold=True)
     verdict_text = verdict.get("answer_fa") or ""
     if verdict_text:
         for line in wrap_text(draw, f"حکم نهایی: {verdict_text}", f_verdict, W - 2 * M):
             y = draw_rtl(draw, W - M, y, line, f_verdict, dark)
 
-    y += 18
+    y += 16
     draw.line([M, y, W - M, y], fill=LINE, width=2)
-    y += 22
+    y += 20
 
-    # Stats grid: 3 columns x 2 rows
+    # Stats grid: 3 columns x 2 rows, light boxes.
     bin_strings = result.get("binary_strings", {}) or {}
     suspicious = len(bin_strings.get("suspicious", []) or []) if not bin_strings.get("unavailable") else 0
     stats = [
         ("دسترسی‌ها", str(result.get("permission_count", 0))),
         ("ترکرها", str(len(result.get("known_trackers", []) or []))),
-        ("دامنه‌ها", str(len(result.get("domains", []) or []))),
+        ("دامنه‌های واقعی", str(len(result.get("domains", []) or []))),
         ("لینک ناامن http", str(len(result.get("insecure_http_urls", []) or []))),
         ("فایل dylib", str(result.get("dylib_count", 0))),
-        ("الگوی مشکوک", str(suspicious + int(result.get("dylib_suspicious_count", 0) or 0))),
+        ("بسته .deb", str(result.get("deb_count", 0))),
     ]
     col_w = (W - 2 * M) // 3
-    f_stat_n = load_font(40, bold=True)
-    f_stat_l = load_font(24)
+    f_stat_n = load_font(38, bold=True)
+    f_stat_l = load_font(23)
     for i, (label, value) in enumerate(stats):
         col, row = i % 3, i // 3
         x0 = M + col * col_w
-        yy = y + row * 96
-        draw.rounded_rectangle([x0, yy, x0 + col_w - 16, yy + 80], radius=14,
+        yy = y + row * 92
+        draw.rounded_rectangle([x0, yy, x0 + col_w - 16, yy + 76], radius=14,
                                fill=(249, 250, 251), outline=LINE, width=1)
-        draw.text((x0 + (col_w - 16) // 2, yy + 12), value, font=f_stat_n,
+        draw.text((x0 + (col_w - 16) // 2, yy + 10), value, font=f_stat_n,
                   fill=INK, anchor="ma")
-        draw.text((x0 + (col_w - 16) // 2, yy + 52), fa(label), font=f_stat_l,
+        draw.text((x0 + (col_w - 16) // 2, yy + 50), fa(label), font=f_stat_l,
                   fill=MUTED, anchor="ma")
-    y += 2 * 96 + 22
+    y += 2 * 92 + 20
 
-    # Four privacy questions (short verdicts)
+    # Privacy answers (5 rows): label in ink, verdict word in a calm colour.
     f_q = load_font(26, bold=True)
-    f_a = load_font(26)
+    f_a = load_font(25)
+    draw.text((W - M, y), fa("پاسخ به سؤال‌های حریم خصوصی"), font=f_q, fill=INK, anchor="ra")
+    y += 42
     q_labels = [
+        ("tampering", "دستکاری شخص ثالث:"),
         ("sends_photos_to_server", "ارسال عکس به سرور:"),
         ("third_party_can_see_photos", "دسترسی شخص ثالث به عکس:"),
         ("collects_photo_info", "جمع‌آوری اطلاعات عکس:"),
         ("verdict", "حکم نهایی:"),
     ]
-    draw.text((W - M, y), fa("پاسخ به سؤال‌های حریم خصوصی"), font=f_q, fill=INK, anchor="ra")
-    y += 44
     for qid, label in q_labels:
         a = answers.get(qid, {}) or {}
         verdict_word = VERDICT_FA.get(a.get("verdict", ""), a.get("answer_fa", "—"))
+        # One wrapped line per answer, all in ink: the score circle is
+        # the only coloured verdict element, keeping the card calm.
         line = f"{label} {verdict_word}"
         for wrapped in wrap_text(draw, line, f_a, W - 2 * M):
             y = draw_rtl(draw, W - M, y, wrapped, f_a, INK)
-    y += 10
+    y += 8
 
-    # Top findings (max 3)
+    # Top findings (max 3), muted.
     top = [f for f in (result.get("findings", []) or [])
            if f.get("severity") in ("critical", "high")][:3]
     if top:
         draw.line([M, y, W - M, y], fill=LINE, width=2)
-        y += 18
+        y += 16
         draw.text((W - M, y), fa("مهم‌ترین یافته‌ها"), font=f_q, fill=INK, anchor="ra")
-        y += 44
+        y += 40
         for f in top:
             # "http://" inside RTL text gets bidi-mirrored to "//:http";
             # the card is a visual summary, so shorten it here only.
-            text = "• " + (f.get("title_fa", "") or "").replace("http://", "http")
-            for wrapped in wrap_text(draw, text, f_a, W - 2 * M):
-                y = draw_rtl(draw, W - M, y, wrapped, f_a, MUTED)
+            # The bullet is drawn separately at the right edge: a "•"
+            # prefix inside an RTL line ends up at the visual left.
+            text = (f.get("title_fa", "") or "").replace("http://", "http")
+            for wrapped in wrap_text(draw, text, f_a, W - 2 * M - 28):
+                draw.text((W - M, y + 6), "•", font=f_a, fill=MUTED, anchor="ra")
+                y = draw_rtl(draw, W - M - 28, y, wrapped, f_a, MUTED)
 
     # Footer
-    f_foot = load_font(22)
+    f_foot = load_font(21)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    draw.text((W - M, H - 64), fa(f"sibstars.ir  •  {stamp}"), font=f_foot,
+    draw.text((W - M, H - 62), fa(f"sibstars.ir  •  {stamp}"), font=f_foot,
               fill=MUTED, anchor="ra")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
