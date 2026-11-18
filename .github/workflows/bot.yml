@@ -1,0 +1,62 @@
+# 24h bot with long-polling on GitHub Actions (same pattern as LinkYar):
+# - instant long-polling (replies in seconds)
+# - each job lives ~5 hours
+# - at the end it triggers the next job itself with RESPAWN_PAT (endless chain)
+name: Telegram bot
+
+on:
+  schedule:
+    # backup in case the chain breaks once
+    - cron: "0 * * * *"
+    - cron: "30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: telegram-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot (instant long-polling, ~5 hours)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          # stops with SIGINT after 5 hours so the next job can take over
+          timeout --signal=SIGINT 18000 python -u bot.py || code=$?
+          # 124 = normal timeout
+          if [ "${code:-0}" = "124" ] || [ "${code:-0}" = "0" ]; then
+            exit 0
+          fi
+          exit "${code:-1}"
+
+      - name: Respawn next keep-alive job
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.RESPAWN_PAT }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "RESPAWN_PAT missing - cannot trigger the next job"
+            exit 0
+          fi
+          gh workflow run "bot.yml" --repo "$GITHUB_REPOSITORY"
+          echo "respawn requested"
