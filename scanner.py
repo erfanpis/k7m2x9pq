@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 """
-SibStar IPA Scanner v2 — deep scan (stdlib only, no paid dependencies)
+SibStar IPA Scanner v3 — deep scan (stdlib only, no paid dependencies)
 Scans an iOS .ipa (ZIP containing Payload/*.app) WITHOUT decryption:
 
-  v2 vs v1:
-  - PrivacyInfo.xcprivacy manifest (tracking, tracking domains, collected
-    data types + purposes, accessed API types + reasons)
-  - Full Mach-O load-command parse: linked dylibs, rpaths, LC_BUILD_VERSION
-    / LC_VERSION_MIN_IPHONEOS (min iOS), UUID, CPU type, FAT slices
-  - Binary strings analysis (ONLY when decrypted): URLs/domains + suspicious
-    API/selector patterns (advertisingIdentifier, location, contacts, keychain,
-    pasteboard, dlopen/dlsym, IOKit, sysctl, ...)
-  - Code-signature presence (_CodeSignature/CodeResources)
-  - App-size breakdown (total / binary / frameworks)
-  - Expanded tracker SDK list (30+), Apple-DTD false positive fixed
-  - Granular 0-100 risk score with a per-item point breakdown
+  v3 vs v2:
+  - More Info.plist coverage: background modes, file sharing, Bonjour
+    services, required device capabilities, SDK/Xcode build info (DT* keys)
+  - Privacy manifest: per-data-type risk (sensitive types flagged),
+    cross-check of tracking domains against the domains found in the bundle
+  - Tracker SDK list expanded (60+), also matched against static libs (.a)
+    and .bundle names, not only .framework/.dylib names
+  - Suspicious binary patterns expanded (30): HealthKit, PhotoKit,
+    Bluetooth, NFC, Face ID, speech, motion, anti-debug (ptrace), process
+    spawning, runtime introspection, network-interface enumeration
+  - URL/domain analysis with per-domain risk: http-only, IP-literal hosts,
+    known tracker/ad domains, manifest tracking domains
+  - Entitlements analysed per key with severity (get-task-allow, push,
+    associated domains, HealthKit, HomeKit, NFC, multicast, VPN, …)
+  - Provisioning profile: type (development/distribution/enterprise),
+    expiry check, team, app ID
+  - ATS: per-exception-domain details (insecure loads, forward secrecy,
+    minimum TLS, subdomains)
+  - Embedded frameworks: per-framework bundle ID, version, size, own
+    PrivacyInfo.xcprivacy
+  - Every finding now carries a severity (critical/high/medium/low/info)
+    in result["findings"], alongside the 0-100 risk breakdown
 
 Cannot do on an encrypted App Store IPA: binary strings / API-pattern
 analysis needs a decrypted IPA. FairPlay encryption is detected (cryptid)
@@ -24,6 +34,7 @@ Usage:
   python3 scanner.py app.ipa [--json out.json] [--report out.md]
 """
 import argparse, hashlib, json, plistlib, re, struct, sys, tempfile, zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -67,6 +78,7 @@ PERMISSIONS = {
     "NSSystemExtensionUsageDescription": ("اکستنشن سیستم", "System Extension", 6),
     "NSFileProviderUsageDescription": ("فایل‌پرووایدر", "File Provider", 5),
     "NSLocationDefaultAccuracyReducedUsageDescription": ("موقعیت با دقت کم", "Location Reduced Accuracy", 4),
+    "NSLocationUsageDescription": ("موقعیت مکانی (کلید قدیمی و منسوخ)", "Location (deprecated key)", 7),
 }
 
 KNOWN_TRACKERS = {
@@ -110,6 +122,31 @@ KNOWN_TRACKERS = {
     "matomo": "Matomo",
     "tealium": "Tealium",
     "mparticle": "mParticle",
+    "segment": "Segment",
+    "fullstory": "FullStory",
+    "instabug": "Instabug",
+    "rollbar": "Rollbar",
+    "datadog": "Datadog",
+    "newrelic": "New Relic",
+    "appmetrica": "AppMetrica (Yandex)",
+    "yandexmetrica": "Yandex Metrica",
+    "adcolony": "AdColony",
+    "tapjoy": "Tapjoy",
+    "fyber": "Fyber",
+    "inmobi": "InMobi",
+    "smaato": "Smaato",
+    "pubmatic": "PubMatic",
+    "revenuecat": "RevenueCat",
+    "adapty": "Adapty",
+    "qonversion": "Qonversion",
+    "airbridge": "Airbridge",
+    "moloco": "Moloco",
+    "mintegral": "Mintegral",
+    "pangle": "Pangle (TikTok)",
+    "startapp": "StartApp",
+    "supersonic": "Supersonic (ironSource)",
+    "mytarget": "myTarget",
+    "openmeasurement": "Open Measurement SDK",
 }
 
 # Suspicious binary patterns (checked ONLY on decrypted binaries).
@@ -128,7 +165,412 @@ SUSPICIOUS_PATTERNS = [
     (r"CTCarrier|CTTelephonyNetworkInfo", "اطلاعات اپراتور سیم‌کارت", "Carrier info", 4),
     (r"ASIdentifierManager", "مدیر شناسه تبلیغاتی اپل", "ASIdentifierManager", 5),
     (r"requestTrackingAuthorization", "درخواست مجوز ردیابی (ATT)", "ATT tracking authorization request", 3),
+    (r"ABAddressBookCreate|ABAddressBookRequestAccess", "دسترسی به مخاطبین با API قدیمی", "Legacy AddressBook access", 6),
+    (r"PHPhotoLibrary|PHAsset", "دسترسی به گالری در کد (PhotoKit)", "PhotoKit access in code", 6),
+    (r"HKHealthStore", "دسترسی به سلامت در کد (HealthKit)", "HealthKit access in code", 6),
+    (r"EKEventStore", "دسترسی به تقویم در کد (EventKit)", "EventKit access in code", 5),
+    (r"CBCentralManager|CBPeripheralManager", "اسکن بلوتوث در کد", "Bluetooth scanning in code", 5),
+    (r"NFCNDEFReaderSession|NFCTagReaderSession", "خواندن NFC در کد", "NFC reading in code", 5),
+    (r"LAContext", "احراز هویت بیومتریک در کد (Face ID / Touch ID)", "Biometric auth in code", 3),
+    (r"ASWebAuthenticationSession", "ورود وب و اشتراک کوکی (ASWebAuthenticationSession)", "Web auth session", 4),
+    (r"AVAudioRecorder|AVAudioSession", "ضبط صدا / میکروفون در کد", "Audio recording in code", 6),
+    (r"CMMotionManager|CMSensorRecorder", "سنسور حرکتی در کد", "Motion sensors in code", 4),
+    (r"SFSpeechRecognizer", "تشخیص گفتار در کد", "Speech recognition in code", 5),
+    (r"NEVPNManager|NEHotspotHelper", "مدیریت VPN / هات‌اسپات در کد", "VPN / hotspot management in code", 5),
+    (r"CXCallObserver|CTCallCenter", "مشاهده تماس‌ها در کد", "Call observation in code", 6),
+    (r"getifaddrs", "خواندن اینترفیس‌های شبکه (MAC / IP)", "Network interface enumeration", 5),
+    (r"\buname\(", "خواندن اطلاعات دستگاه (uname)", "Device info via uname", 3),
+    (r"\bptrace\(", "ضد دیباگ (ptrace)", "Anti-debugging (ptrace)", 6),
+    (r"posix_spawn|execve|fork\(", "اجرای پروسس دیگر (spawn/exec/fork)", "Spawning another process", 7),
+    (r"objc_copyClassList|objc_getClass", "جستجوی کلاس‌ها در ران‌تایم", "Runtime class introspection", 5),
+    (r"_dyld_get_image_name|dyld_get_image", "بازرسی لودر داینامیک (dyld)", "Dynamic loader introspection", 4),
+    (r"DYLD_INSERT_LIBRARIES", "بررسی تزریق کتابخانه (DYLD_INSERT_LIBRARIES)", "Library injection check", 4),
 ]
+
+# Data types in PrivacyInfo.xcprivacy that are sensitive by themselves.
+HIGH_RISK_DATA_TYPES = {
+    "NSPrivacyCollectedDataTypePreciseLocation": ("موقعیت دقیق", 8),
+    "NSPrivacyCollectedDataTypeCoarseLocation": ("موقعیت تقریبی", 5),
+    "NSPrivacyCollectedDataTypeHealth": ("داده سلامت", 9),
+    "NSPrivacyCollectedDataTypeFitness": ("داده تناسب اندام", 7),
+    "NSPrivacyCollectedDataTypeContacts": ("مخاطبین", 8),
+    "NSPrivacyCollectedDataTypePhotosorVideos": ("عکس‌ها یا ویدیوها", 9),
+    "NSPrivacyCollectedDataTypeAudioData": ("داده صوتی", 7),
+    "NSPrivacyCollectedDataTypeEmailsorTextMessages": ("ایمیل یا پیامک", 8),
+    "NSPrivacyCollectedDataTypeOtherUserContent": ("محتوای دیگر کاربر", 7),
+    "NSPrivacyCollectedDataTypePaymentInfo": ("اطلاعات پرداخت", 9),
+    "NSPrivacyCollectedDataTypeCreditInfo": ("اطلاعات اعتباری", 9),
+    "NSPrivacyCollectedDataTypeSensitiveInfo": ("اطلاعات حساس", 9),
+}
+
+# Known analytics / ads / tracking domain suffixes (for domain risk analysis).
+TRACKER_DOMAIN_SUFFIXES = [
+    "google-analytics.com", "googletagmanager.com", "doubleclick.net",
+    "googlesyndication.com", "graph.facebook.com", "facebook.com",
+    "appsflyer.com", "adjust.com", "app.adjust.com", "branch.io",
+    "mixpanel.com", "amplitude.com", "api.amplitude.com", "sentry.io",
+    "crashlytics.com", "fabric.io", "flurry.com", "data.flurry.com",
+    "onesignal.com", "clevertap.com", "braze.com", "intercom.io",
+    "zendesk.com", "bugsnag.com", "heap.io", "pendo.io", "countly.com",
+    "matomo.cloud", "tealiumiq.com", "mparticle.com", "kochava.com",
+    "singular.net", "tenjin.io", "applovin.com", "ironsource.com",
+    "vungle.com", "mopub.com", "chartboost.com", "adcolony.com",
+    "tapjoy.com", "inmobi.com", "fyber.com", "smaato.com", "pubmatic.com",
+    "segment.com", "segment.io", "fullstory.com", "instabug.com",
+    "appcenter.ms", "appmetrica.yandex", "yandexmetrica", "revenuecat.com",
+    "api.revenuecat.com", "pangle.io", "mintegral.com", "moloco.com",
+    "airbridge.io", "snapchat.com", "tiktok.com", "api.tiktok.com",
+]
+
+# Entitlement key -> (Persian label, severity, risk points)
+SENSITIVE_ENTITLEMENTS = {
+    "get-task-allow": ("قابل دیباگ بودن باینری (نسخه توسعه)", "high", 10),
+    "aps-environment": ("پوش نوتیفیکیشن (APNs)", "low", 0),
+    "com.apple.developer.associated-domains": ("دامنه‌های مرتبط (Universal Links)", "medium", 3),
+    "com.apple.developer.healthkit": ("دسترسی HealthKit", "high", 6),
+    "com.apple.developer.homekit": ("دسترسی HomeKit", "medium", 4),
+    "com.apple.developer.healthkit.access": ("دسترسی HealthKit", "high", 6),
+    "com.apple.developer.in-app-payments": ("پرداخت درون‌برنامه‌ای", "low", 0),
+    "com.apple.developer.nfc.readersession.formats": ("خواندن تگ NFC", "medium", 4),
+    "com.apple.developer.siri": ("دسترسی سیری", "low", 2),
+    "com.apple.developer.networking.multicast": ("مالتی‌کست شبکه محلی", "medium", 4),
+    "com.apple.developer.networking.networkextension": ("اکستنشن شبکه / VPN", "high", 5),
+    "com.apple.developer.networking.wifi-info": ("اطلاعات وای‌فای (SSID/BSSID)", "high", 6),
+    "com.apple.developer.devicecheck.appattest-environment": ("App Attest (DeviceCheck)", "low", 0),
+    "com.apple.developer.applesignin": ("ورود با اپل (Sign in with Apple)", "low", 0),
+    "com.apple.developer.fileprovider.testing-mode": ("File Provider (دسترسی فایل)", "medium", 3),
+    "com.apple.developer.default-data-protection": ("محافظت داده پیش‌فرض", "info", 0),
+    "com.apple.developer.associated-appclip-app-identifiers": ("App Clip مرتبط", "low", 0),
+    "com.apple.security.application-groups": ("گروه اپلیکیشن (اشتراک داده بین برنامه‌ها)", "medium", 3),
+    "com.apple.developer.kernel.extended-virtual-addressing": ("آدرس‌دهی مجازی گسترده کرنل", "medium", 3),
+    "com.apple.developer.playable-content": ("محتوای قابل پخش", "info", 0),
+    "com.apple.developer.usernotifications.filtering": ("فیلتر نوتیفیکیشن", "low", 0),
+}
+
+IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+
+def severity_for_points(points):
+    if points >= 10:
+        return "critical"
+    if points >= 7:
+        return "high"
+    if points >= 4:
+        return "medium"
+    if points >= 1:
+        return "low"
+    return "info"
+
+
+def analyze_domains(domains, http_urls, tracking_domains):
+    """Per-domain risk: http-only, IP literal, known tracker/ad domain,
+    or listed in the privacy manifest as a tracking domain."""
+    http_hosts = {urlparse(u).hostname for u in (http_urls or []) if urlparse(u).hostname}
+    tracking = set(tracking_domains or [])
+    out = []
+    for d in sorted(domains or []):
+        low = d.lower()
+        is_tracker = any(low == s or low.endswith("." + s) for s in TRACKER_DOMAIN_SUFFIXES)
+        is_ip = bool(IP_RE.match(d))
+        http_only = d in http_hosts
+        points = 0
+        reasons = []
+        if is_tracker:
+            points += 4
+            reasons.append("دامنه ترکر/تبلیغات شناخته‌شده")
+        if d in tracking:
+            points += 4
+            reasons.append("در مانیفست حریم خصوصی به‌عنوان دامنه ردیابی اعلام شده")
+        if http_only:
+            points += 5
+            reasons.append("فقط با http ناامن فراخوانی می‌شود")
+        if is_ip:
+            points += 3
+            reasons.append("آدرس IP مستقیم به‌جای دامنه (پنهان‌کاری)")
+        out.append({
+            "domain": d, "is_tracker_domain": is_tracker,
+            "in_tracking_manifest": d in tracking,
+            "http_only": http_only, "is_ip_literal": is_ip,
+            "risk_points": points, "severity": severity_for_points(points),
+            "reasons_fa": reasons,
+        })
+    return out
+
+
+def analyze_entitlements(ent):
+    """Per-entitlement findings with severity. Only keys present are listed."""
+    out = []
+    for key, value in (ent or {}).items():
+        if key == "get-task-allow" and value is not True:
+            continue  # False means a release build — not a finding
+        if key in SENSITIVE_ENTITLEMENTS:
+            label_fa, sev, pts = SENSITIVE_ENTITLEMENTS[key]
+            out.append({"key": key, "value": str(value)[:200], "label_fa": label_fa,
+                        "severity": sev, "points": pts})
+    return sorted(out, key=lambda f: -f["points"])
+
+
+def analyze_provisioning(parsed):
+    """Provisioning profile: type, expiry, team. Dates are strings (JSON-safe)."""
+    if not parsed:
+        return None
+    out = {
+        "name": parsed.get("Name"),
+        "team": (parsed.get("TeamIdentifier") or [None])[0],
+        "app_id_name": parsed.get("AppIDName"),
+        "creation_date": str(parsed.get("CreationDate")) if parsed.get("CreationDate") else None,
+        "expiration_date": str(parsed.get("ExpirationDate")) if parsed.get("ExpirationDate") else None,
+        "expired": None, "days_until_expiry": None, "profile_type": "unknown",
+    }
+    if parsed.get("ProvisionedDevices"):
+        out["profile_type"] = "development"
+    elif parsed.get("ProvisionsAllDevices"):
+        out["profile_type"] = "enterprise"
+    elif parsed.get("Entitlements", {}).get("get-task-allow") is True:
+        out["profile_type"] = "development"
+    else:
+        out["profile_type"] = "distribution"
+    exp = parsed.get("ExpirationDate")
+    if exp:
+        try:
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            exp_naive = exp.replace(tzinfo=None) if getattr(exp, "tzinfo", None) else exp
+            delta = (exp_naive - now).days
+            out["days_until_expiry"] = delta
+            out["expired"] = delta < 0
+        except Exception:
+            pass
+    return out
+
+
+def parse_plist_security(info):
+    """Security-relevant Info.plist keys beyond permissions and ATS."""
+    bg = info.get("UIBackgroundModes") or []
+    return {
+        "background_modes": sorted(bg),
+        "background_location": "location" in bg,
+        "background_fetch": "fetch" in bg,
+        "background_audio": "audio" in bg,
+        "background_voip": "voip" in bg,
+        "background_processing": "processing" in bg,
+        "file_sharing_enabled": bool(info.get("UIFileSharingEnabled", False)),
+        "supports_opening_documents_in_place": bool(info.get("LSSupportsOpeningDocumentsInPlace", False)),
+        "supports_document_browser": bool(info.get("UISupportsDocumentBrowser", False)),
+        "bonjour_services": sorted(info.get("NSBonjourServices") or []),
+        "document_types": sorted(
+            {d.get("CFBundleTypeName") for d in (info.get("CFBundleDocumentTypes") or []) if d.get("CFBundleTypeName")}),
+        "required_device_capabilities": sorted(info.get("UIRequiredDeviceCapabilities") or []),
+        "device_family": info.get("UIDeviceFamily"),
+        "uses_non_exempt_encryption": info.get("ITSAppUsesNonExemptEncryption"),
+    }
+
+
+def parse_sdk_info(info):
+    """Build/SDK metadata from the DT* keys Xcode writes into Info.plist."""
+    return {
+        "sdk_name": info.get("DTSDKName"),
+        "sdk_build": info.get("DTSDKBuild"),
+        "platform_name": info.get("DTPlatformName"),
+        "platform_version": info.get("DTPlatformVersion"),
+        "platform_build": info.get("DTPlatformBuild"),
+        "xcode": info.get("DTXcode"),
+        "xcode_build": info.get("DTXcodeBuild"),
+        "compiler": info.get("DTCompiler"),
+        "build_machine_os": info.get("BuildMachineOSBuild"),
+    }
+
+
+def framework_details(app_dir, frameworks):
+    """Per-framework: bundle ID, version, size, own privacy manifest."""
+    out = []
+    fw_dir = Path(app_dir) / "Frameworks"
+    for name in frameworks:
+        fdir = fw_dir / name
+        entry = {"name": name, "bundle_id": None, "version": None,
+                 "size_bytes": 0, "has_privacy_manifest": False}
+        try:
+            entry["size_bytes"] = sum(p.stat().st_size for p in fdir.rglob("*") if p.is_file())
+        except Exception:
+            pass
+        plist = fdir / "Info.plist"
+        if plist.is_file():
+            try:
+                with open(plist, "rb") as f:
+                    pl = plistlib.load(f)
+                entry["bundle_id"] = pl.get("CFBundleIdentifier")
+                entry["version"] = pl.get("CFBundleShortVersionString")
+            except Exception:
+                pass
+        entry["has_privacy_manifest"] = (fdir / "PrivacyInfo.xcprivacy").is_file()
+        out.append(entry)
+    return out
+
+
+def build_privacy_answers(r):
+    """Answer the four Picsart-style privacy questions for this IPA, in Persian.
+
+    Each answer has: question, short answer (verdict word), verdict level
+    (yes / possible / no-evidence / unknown), evidence bullets and honest
+    limits. Static analysis can show capability + endpoints, never the
+    actual runtime traffic — the answers say so explicitly.
+    """
+    ident = r.get("identity", {})
+    name = ident.get("display_name") or "این برنامه"
+    perms = {p["key"] for p in r.get("permissions", [])}
+    pm = r.get("privacy_manifest") or {}
+    ats = r.get("ats", {})
+    domains = r.get("domains", [])
+    http_urls = r.get("insecure_http_urls", [])
+    trackers = r.get("known_trackers", [])
+    plist_sec = r.get("plist_security", {})
+    bin_strings = r.get("binary_strings") or {}
+    encrypted = r.get("binary", {}).get("encrypted") is True
+    suspicious = [] if bin_strings.get("unavailable") else bin_strings.get("suspicious", [])
+    photo_perm = bool(perms & {"NSPhotoLibraryUsageDescription",
+                               "NSPhotoLibraryAddUsageDescription"})
+    bg = plist_sec.get("background_modes", [])
+
+    # ---- Q1: does it send photos/files to a server or cloud? ----
+    q1_evidence, q1_limits = [], []
+    if photo_perm:
+        q1_evidence.append("دسترسی به گالری عکس در Info.plist اعلام شده است.")
+    else:
+        q1_evidence.append("دسترسی به گالری عکس در Info.plist اعلام نشده است.")
+    if domains:
+        q1_evidence.append(f"برنامه با {len(domains)} سرور ارتباط برقرار می‌کند: "
+                            + "، ".join(domains[:10]) + ("…" if len(domains) > 10 else ""))
+    else:
+        q1_evidence.append("هیچ دامنه‌ی شبکه‌ای در باندل پیدا نشد.")
+    if bg:
+        q1_evidence.append("حالت‌های پس‌زمینه: " + "، ".join(bg) +
+                            " (اجرای پس‌زمینه یعنی امکان آپلود بدون باز بودن برنامه).")
+    if ats.get("allows_arbitrary_loads"):
+        q1_evidence.append("ATS اجازه‌ی ترافیک رمزنگاری‌نشده (http) را می‌دهد.")
+    if http_urls:
+        q1_evidence.append(f"{len(http_urls)} آدرس http:// ناامن در باندل پیدا شد.")
+    q1_limits.append("تحلیل ایستا فقط «توانایی» و «آدرس سرورها» را نشان می‌دهد؛ "
+                     "اینکه واقعاً چه فایلی و چه زمانی ارسال می‌شود فقط با رصد ترافیک زمان اجرا مشخص می‌شود.")
+    if photo_perm and domains:
+        q1_verdict, q1_short = "possible", "ممکن است — دسترسی به عکس + سرور دارد"
+    elif photo_perm:
+        q1_verdict, q1_short = "possible", "ممکن است — دسترسی به عکس دارد ولی سروری پیدا نشد"
+    elif domains:
+        q1_verdict, q1_short = "possible", "ممکن است — سرور دارد ولی دسترسی عکس اعلام نشده"
+    else:
+        q1_verdict, q1_short = "no-evidence", "شواهدی نیست"
+
+    # ---- Q2: could the mod maker / a third party see user photos/videos? ----
+    q2_evidence, q2_limits = [], []
+    if trackers:
+        q2_evidence.append(f"{len(trackers)} ترکر/SDK شخص ثالث در باندل است: "
+                            + "، ".join(t["tracker"] for t in trackers[:8]))
+    else:
+        q2_evidence.append("هیچ ترکر/SDK شناخته‌شده‌ای در باندل پیدا نشد.")
+    tracker_domains = [d["domain"] for d in r.get("domain_analysis", []) if d["is_tracker_domain"]]
+    if tracker_domains:
+        q2_evidence.append("دامنه‌های ترکر/تبلیغات: " + "، ".join(tracker_domains[:8]))
+    if pm.get("tracking"):
+        q2_evidence.append("مانیفست حریم خصوصی ردیابی کاربر را تأیید می‌کند (NSPrivacyTracking).")
+    if pm.get("tracking_domains"):
+        q2_evidence.append("دامنه‌های ردیابی اعلام‌شده در مانیفست: "
+                            + "، ".join(pm["tracking_domains"][:5]))
+    if http_urls:
+        q2_evidence.append(f"ارسال با http ناامن ({len(http_urls)} آدرس) یعنی محتوای ارسالی "
+                            "در مسیر قابل شنود است.")
+    if suspicious:
+        names = [h["label_fa"] for h in suspicious]
+        q2_evidence.append("الگوهای مشکوک در باینری: " + "، ".join(names[:6]))
+    if encrypted:
+        q2_limits.append("باینری رمزگذاری‌شده است؛ الگوهای API باینری قابل بررسی نبود، "
+                         "پس نبودِ نشانه دلیل قطعی بر نبودِ دسترسی نیست.")
+    q2_limits.append("این اسکن نمی‌تواند بگوید سازنده‌ی ماد واقعاً چه می‌بیند؛ "
+                     "فقط نشان می‌دهد چه کانال‌هایی برای خروج داده وجود دارد.")
+    if trackers or tracker_domains or http_urls or pm.get("tracking"):
+        q2_verdict, q2_short = "possible", "ممکن است — کانال خروج داده به شخص ثالث وجود دارد"
+    elif encrypted:
+        q2_verdict, q2_short = "unknown", "قابل بررسی نیست — باینری رمزگذاری‌شده است"
+    else:
+        q2_verdict, q2_short = "no-evidence", "شواهدی نیست — ولی رد قطعی هم نمی‌شود"
+
+    # ---- Q3: does it collect user photo/file info? ----
+    q3_evidence, q3_limits = [], []
+    collected = pm.get("collected_data_types", []) if isinstance(pm, dict) else []
+    photo_types = [c for c in collected
+                   if (c.get("type") or "") in ("NSPrivacyCollectedDataTypePhotosorVideos",
+                                                "NSPrivacyCollectedDataTypeOtherUserContent",
+                                                "NSPrivacyCollectedDataTypeAudioData")]
+    if photo_types:
+        for c in photo_types:
+            q3_evidence.append(f"مانیفست اعلام می‌کند «{c['type']}» جمع‌آوری می‌شود "
+                               f"(متصل به هویت: {c.get('linked')}، ردیابی: {c.get('tracking')}، "
+                               f"اهداف: {', '.join(c.get('purposes') or []) or '—'}).")
+    elif collected:
+        q3_evidence.append(f"مانیفست {len(collected)} نوع داده اعلام می‌کند، ولی «عکس/ویدیو» "
+                            "در آن نیست: " + "، ".join(c.get("type", "?") for c in collected[:5]))
+    else:
+        q3_evidence.append("مانیفست حریم خصوصی هیچ نوع داده‌ی جمع‌آوری‌شده‌ای اعلام نکرده است.")
+    if photo_perm:
+        q3_evidence.append("دسترسی به گالری عکس اعلام شده است.")
+    analytics = [t["tracker"] for t in trackers
+                 if any(k in t["tracker"].lower() for k in
+                        ("firebase", "amplitude", "mixpanel", "flurry", "segment",
+                         "appsflyer", "adjust", "countly", "matomo", "heap", "pendo"))]
+    if analytics:
+        q3_evidence.append("SDKهای تحلیلی/تبلیغاتی در باندل است: " + "، ".join(analytics[:6]) +
+                            " (این‌ها معمولاً رویدادها و شناسه‌های کاربر را جمع می‌کنند).")
+    if not pm:
+        q3_limits.append("فایل PrivacyInfo.xcprivacy در باندل پیدا نشد؛ "
+                         "یعنی اعلامیه‌ی رسمی جمع‌آوری داده وجود ندارد.")
+    q3_limits.append("جمع‌آوری اعلام‌نشده با تحلیل ایستا قابل رد نیست؛ "
+                     "مانیفست فقط چیزی را نشان می‌دهد که سازنده اعلام کرده است.")
+    if photo_types:
+        q3_verdict, q3_short = "yes", "بله — در مانیفست اعلام شده است"
+    elif collected or analytics:
+        q3_verdict, q3_short = "possible", "احتمالاً — داده جمع می‌شود ولی عکس در مانیفست نیست"
+    else:
+        q3_verdict, q3_short = "no-evidence", "اعلام نشده است"
+
+    # ---- Q4: clear verdict — what was verified, what could not be verified ----
+    verified, unverified = [], []
+    verified.append(f"اسکن ایستا کامل انجام شد (ریسک {r.get('risk', {}).get('score', '?')}/100 — "
+                    f"{r.get('risk', {}).get('level_fa', '')}).")
+    verified.append(f"Info.plist، مانیفست حریم خصوصی، {len(trackers)} ترکر، "
+                    f"{len(domains)} دامنه و تنظیمات ATS بررسی شد.")
+    verified.append("امضای کد و پروفایل provisioning بررسی شد.")
+    if encrypted:
+        unverified.append("باینری رمزگذاری‌شده است (FairPlay)؛ تحلیل رشته‌ها و الگوهای API باینری انجام نشد.")
+    else:
+        verified.append(f"باینری رمزگذاری نشده؛ {len(suspicious)} الگوی مشکوک در رشته‌های باینری بررسی شد.")
+    unverified.append("محتوای واقعی ترافیک شبکه و رفتار زمان اجرا با اسکن ایستا قابل بررسی نیست.")
+    unverified.append("اینکه سازنده‌ی ماد واقعاً چه داده‌ای می‌بیند، فقط با رصد ترافیک و تست زمان اجرا مشخص می‌شود.")
+    if encrypted:
+        q4_verdict, q4_short = "partial", "بررسی ناقص — باینری رمزگذاری‌شده است"
+    elif r.get("risk", {}).get("score", 0) >= 55:
+        q4_verdict, q4_short = "risky", "پرخطر — نشانه‌های جدی حریم خصوصی دارد"
+    elif r.get("risk", {}).get("score", 0) >= 25:
+        q4_verdict, q4_short = "caution", "احتیاط — چند نشانه‌ی حریم خصوصی دارد"
+    else:
+        q4_verdict, q4_short = "ok", "کم‌ریسک — نشانه‌ی جدی پیدا نشد"
+
+    return [
+        {"id": "sends_photos_to_server",
+         "question_fa": "آیا برنامه عکس‌ها/فایل‌ها را به سرور یا فضای ابری می‌فرستد؟",
+         "verdict": q1_verdict, "answer_fa": q1_short,
+         "evidence": q1_evidence, "limits": q1_limits},
+        {"id": "third_party_can_see_photos",
+         "question_fa": "آیا سازنده‌ی ماد یا شخص ثالث می‌تواند عکس‌ها/ویدیوهای کاربر را ببیند یا دریافت کند؟",
+         "verdict": q2_verdict, "answer_fa": q2_short,
+         "evidence": q2_evidence, "limits": q2_limits},
+        {"id": "collects_photo_info",
+         "question_fa": "آیا برنامه اطلاعات عکس/فایل کاربر را جمع‌آوری می‌کند؟",
+         "verdict": q3_verdict, "answer_fa": q3_short,
+         "evidence": q3_evidence, "limits": q3_limits},
+        {"id": "verdict",
+         "question_fa": "حکم نهایی — این نسخه بررسی شده است؟ چه چیزی تأیید شد و چه چیزی قابل بررسی نیست؟",
+         "verdict": q4_verdict, "answer_fa": q4_short,
+         "evidence": verified, "limits": unverified},
+    ]
+
 
 URL_RE = re.compile(rb"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
 ASCII_STR_RE = re.compile(rb"[ -~]{4,}")
@@ -396,11 +838,15 @@ def parse_xcprivacy(app_dir):
         return {"error": str(e)}
     collected = []
     for d in pl.get("NSPrivacyCollectedDataTypes", []) or []:
+        dtype = d.get("NSPrivacyCollectedDataType")
+        risk_label, risk_pts = HIGH_RISK_DATA_TYPES.get(dtype, (None, 0))
         collected.append({
-            "type": d.get("NSPrivacyCollectedDataType"),
+            "type": dtype,
             "linked": bool(d.get("NSPrivacyCollectedDataTypeLinked")),
             "tracking": bool(d.get("NSPrivacyCollectedDataTypeTracking")),
             "purposes": d.get("NSPrivacyCollectedDataTypePurposes") or [],
+            "sensitive": risk_label,
+            "risk_points": risk_pts,
         })
     accessed = []
     for d in pl.get("NSPrivacyAccessedAPITypes", []) or []:
@@ -415,6 +861,64 @@ def parse_xcprivacy(app_dir):
         "accessed_api_types": accessed,
     }
 
+def analyze_dylib(path, app_dir):
+    """Analyse one embedded .dylib separately: Mach-O type, encryption,
+    linked libraries, suspicious strings/patterns, and its own risk.
+
+    Encrypted or unparseable dylibs are reported with an explicit reason —
+    never skipped silently.
+    """
+    rel = str(path.relative_to(app_dir)) if str(path).startswith(str(app_dir)) else path.name
+    entry = {"name": path.name, "path": rel, "size_bytes": 0,
+             "is_macho": False, "cpu": None, "is64": None, "fat": False,
+             "encrypted": None, "cryptid": None, "min_os": None,
+             "linked_dylibs": [], "suspicious": [], "string_count": 0,
+             "urls": [], "domains": [], "insecure_http_urls": [],
+             "risk_points": 0, "severity": "info", "unavailable": None,
+             "error": None, "tracker": None}
+    try:
+        entry["size_bytes"] = path.stat().st_size
+    except Exception as e:
+        entry["error"] = str(e)
+        return entry
+    macho = parse_macho_deep(path)
+    entry.update({k: macho.get(k) for k in
+                  ("is_macho", "cpu", "is64", "fat", "encrypted", "cryptid", "min_os",
+                   "linked_dylibs", "uuid", "has_code_signature") if k in macho})
+    if macho.get("error") and not macho.get("is_macho"):
+        entry["error"] = macho["error"]
+        entry["unavailable"] = "Mach-O نیست یا قابل خواندن نیست: " + str(macho["error"])
+        return entry
+    low = path.name.lower()
+    for needle, label in KNOWN_TRACKERS.items():
+        if needle in low:
+            entry["tracker"] = label
+            break
+    if macho.get("encrypted") is True:
+        entry["unavailable"] = "رمزگذاری‌شده (FairPlay) — تحلیل رشته‌ها و الگوهای باینری ممکن نیست"
+        entry["severity"] = "info"
+        return entry
+    if macho.get("encrypted") is None and macho.get("cryptid") is None:
+        entry["unavailable"] = "وضعیت رمزگذاری مشخص نشد — تحلیل رشته‌ها انجام نشد"
+        return entry
+    strings_result = scan_binary_strings(path)
+    if strings_result.get("error"):
+        entry["error"] = strings_result["error"]
+        entry["unavailable"] = "خواندن رشته‌های باینری ناموفق بود: " + str(strings_result["error"])
+        return entry
+    entry["string_count"] = strings_result.get("string_count", 0)
+    entry["urls"] = strings_result.get("urls", [])
+    entry["domains"] = strings_result.get("domains", [])
+    entry["insecure_http_urls"] = strings_result.get("insecure_http_urls", [])
+    entry["suspicious"] = strings_result.get("suspicious", [])
+    pts = sum(h.get("points", 0) for h in entry["suspicious"])
+    if entry["tracker"]:
+        pts += 5
+    entry["risk_points"] = pts
+    entry["severity"] = severity_for_points(pts)
+    return entry
+
+
 # ---------------- main scan ----------------
 def scan_ipa(ipa_path, workdir):
     ipa_path = Path(ipa_path)
@@ -424,7 +928,7 @@ def scan_ipa(ipa_path, workdir):
         "file": str(ipa_path),
         "sha256": sha256_of(ipa_path),
         "size_bytes": ipa_path.stat().st_size,
-        "scanner": "sibstar-ipa-scanner 2.0 (stdlib only)",
+        "scanner": "sibstar-ipa-scanner 3.0 (stdlib only)",
         "limits": [
             "App Store IPAs are FairPlay-encrypted: binary string / API-pattern analysis needs a decrypted IPA.",
             "This scan reads Info.plist, PrivacyInfo.xcprivacy, frameworks, entitlements, ATS and embedded URLs without decryption.",
@@ -461,6 +965,8 @@ def scan_ipa(ipa_path, workdir):
         "supported_devices": info.get("UISupportedDevices"),
         "requires_iphone_os": bool(info.get("LSRequiresIPhoneOS", False)),
     }
+    result["sdk_info"] = parse_sdk_info(info)
+    result["plist_security"] = parse_plist_security(info)
 
     perms = []
     for key, (fa, en, risk) in PERMISSIONS.items():
@@ -480,12 +986,22 @@ def scan_ipa(ipa_path, workdir):
     result["queries_schemes"] = sorted(set(info.get("LSApplicationQueriesSchemes", []) or []))
 
     ats = info.get("NSAppTransportSecurity") or {}
+    exc_details = {}
+    for domain, cfg in (ats.get("NSExceptionDomains") or {}).items():
+        if isinstance(cfg, dict):
+            exc_details[domain] = {
+                "includes_subdomains": bool(cfg.get("NSIncludesSubdomains", False)),
+                "allows_insecure_http": bool(cfg.get("NSExceptionAllowsInsecureHTTPLoads", False)),
+                "requires_forward_secrecy": cfg.get("NSExceptionRequiresForwardSecrecy", True),
+                "minimum_tls": cfg.get("NSExceptionMinimumTLSVersion"),
+            }
     result["ats"] = {
         "allows_arbitrary_loads": bool(ats.get("NSAllowsArbitraryLoads", False)),
         "allows_local_networking": bool(ats.get("NSAllowsLocalNetworking", False)),
         "allows_arbitrary_loads_in_web_content": bool(ats.get("NSAllowsArbitraryLoadsInWebContent", False)),
         "allows_arbitrary_loads_for_media": bool(ats.get("NSAllowsArbitraryLoadsForMedia", False)),
         "exception_domains": sorted((ats.get("NSExceptionDomains") or {}).keys()),
+        "exception_domain_details": exc_details,
         "raw": ats,
     }
 
@@ -497,17 +1013,22 @@ def scan_ipa(ipa_path, workdir):
     frameworks = sorted(p.name for p in fw_dir.glob("*.framework")) if fw_dir.is_dir() else []
     fw_size = sum(p.stat().st_size for p in fw_dir.rglob("*") if p.is_file()) if fw_dir.is_dir() else 0
     dylibs = sorted(p.name for p in app_dir.glob("*.dylib"))
+    static_libs = sorted(p.name for p in app_dir.glob("*.a"))
+    bundles = sorted(p.name for p in app_dir.glob("*.bundle"))
     extensions = sorted(p.name for p in app_dir.glob("PlugIns/*.appex")) if (app_dir / "PlugIns").is_dir() else []
     result["frameworks"] = frameworks
     result["dylibs"] = dylibs
+    result["static_libs"] = static_libs
+    result["bundles"] = bundles
     result["app_extensions"] = extensions
+    result["framework_details"] = framework_details(app_dir, frameworks)
     result["size_breakdown"] = {
         "total_bytes": sum(p.stat().st_size for p in app_dir.rglob("*") if p.is_file()),
         "frameworks_bytes": fw_size,
         "framework_count": len(frameworks),
     }
     trackers = []
-    for name in frameworks + dylibs:
+    for name in frameworks + dylibs + static_libs + bundles:
         low = name.lower()
         for needle, label in KNOWN_TRACKERS.items():
             if needle in low:
@@ -534,16 +1055,13 @@ def scan_ipa(ipa_path, workdir):
     if prov.is_file():
         parsed = parse_mobileprovision(prov)
         if parsed:
-            prov_info = {"name": parsed.get("Name"),
-                         "team": (parsed.get("TeamIdentifier") or [None])[0],
-                         "app_id_name": parsed.get("AppIDName"),
-                         "creation_date": str(parsed.get("CreationDate")) if parsed.get("CreationDate") else None,
-                         "expiration_date": str(parsed.get("ExpirationDate")) if parsed.get("ExpirationDate") else None}
+            prov_info = analyze_provisioning(parsed)
             if isinstance(parsed.get("Entitlements"), dict):
                 ent.update(parsed["Entitlements"])
     result["provisioning"] = prov_info
     result["entitlements"] = ent
     result["entitlement_keys"] = sorted(ent.keys())
+    result["entitlement_findings"] = analyze_entitlements(ent)
 
     # Code signature presence
     code_sig = (app_dir / "_CodeSignature").is_dir()
@@ -580,16 +1098,31 @@ def scan_ipa(ipa_path, workdir):
     result["binary"] = binary
     result["binary_strings"] = bin_strings
 
+    # Embedded .dylib files — each analysed separately (never skipped silently)
+    dylib_paths = sorted(p for p in app_dir.rglob("*.dylib") if p.is_file())[:50]
+    dylib_analysis = [analyze_dylib(p, app_dir) for p in dylib_paths]
+    result["dylib_analysis"] = dylib_analysis
+    result["dylib_count"] = len(dylib_analysis)
+    result["dylib_suspicious_count"] = sum(len(d.get("suspicious", [])) for d in dylib_analysis)
+
     # URLs / domains: bundle files + (decrypted) binary strings, merged
     urls, domains, http_urls = scan_bundle_files(app_dir)
     if bin_strings and not bin_strings.get("unavailable"):
         urls = sorted(set(urls) | set(bin_strings.get("urls", [])))
         domains = sorted(set(domains) | set(bin_strings.get("domains", [])))
         http_urls = sorted(set(http_urls) | set(bin_strings.get("insecure_http_urls", [])))
+    for d in dylib_analysis:
+        if not d.get("unavailable"):
+            urls = sorted(set(urls) | set(d.get("urls", [])))
+            domains = sorted(set(domains) | set(d.get("domains", [])))
+            http_urls = sorted(set(http_urls) | set(d.get("insecure_http_urls", [])))
     result["urls"] = urls[:200]
     result["url_count"] = len(urls)
     result["domains"] = domains
     result["insecure_http_urls"] = http_urls
+    pm_for_domains = result.get("privacy_manifest") or {}
+    result["domain_analysis"] = analyze_domains(
+        domains, http_urls, pm_for_domains.get("tracking_domains", []))
 
     # ---- Risk score v2: granular breakdown, 0-100 ----
     score, breakdown = 0, []
@@ -626,9 +1159,37 @@ def scan_ipa(ipa_path, workdir):
         add(min(15, 5 * len(dedup)), f"{len(dedup)} ترکر/SDK شناخته‌شده: {', '.join(t['tracker'] for t in dedup)}")
     if ent.get("get-task-allow") is True:
         add(10, "get-task-allow = true — باینری قابل دیباگ است (نسخه‌ی توسعه، نه انتشار)")
+    for f in result.get("entitlement_findings", []):
+        if f["points"] > 0 and f["key"] != "get-task-allow":
+            add(f["points"], f"Entitlement حساس: {f['label_fa']} (`{f['key']}`)")
+    if pm and not pm.get("error"):
+        sensitive_types = [c for c in pm.get("collected_data_types", [])
+                           if c.get("risk_points", 0) >= 8]
+        if sensitive_types:
+            add(8, "مانیفست داده‌ی حساس جمع می‌کند: " +
+                "، ".join(c.get("sensitive") or c.get("type", "?") for c in sensitive_types[:4]))
+    for domain_entry in result.get("domain_analysis", []):
+        if domain_entry.get("is_tracker_domain"):
+            add(3, f"دامنه ترکر/تبلیغات: {domain_entry['domain']}")
+    insecure_exc = [d for d, cfg in result["ats"].get("exception_domain_details", {}).items()
+                    if cfg.get("allows_insecure_http")]
+    if insecure_exc:
+        add(5, f"ATS برای این دامنه‌ها http ناامن را مجاز می‌کند: {', '.join(insecure_exc)}")
+    plist_sec = result.get("plist_security", {})
+    if plist_sec.get("background_location"):
+        add(6, "حالت پس‌زمینه location فعال است — ردیابی موقعیت در پس‌زمینه")
+    if plist_sec.get("file_sharing_enabled"):
+        add(4, "UIFileSharingEnabled فعال است — فایل‌های برنامه از طریق iTunes قابل دسترسی‌اند")
+    if plist_sec.get("bonjour_services"):
+        add(3, f"سرویس‌های Bonjour (شبکه محلی): {', '.join(plist_sec['bonjour_services'][:4])}")
     if bin_strings and not bin_strings.get("unavailable"):
         for hit in bin_strings.get("suspicious", []):
             add(hit["points"], f"الگوی مشکوک در باینری: {hit['label_fa']} ({hit['matches']} مورد)")
+    for d in dylib_analysis:
+        for hit in d.get("suspicious", []):
+            add(hit["points"], f"الگوی مشکوک در dylib {d['name']}: {hit['label_fa']} ({hit['matches']} مورد)")
+        if d.get("tracker"):
+            add(5, f"dylib ترکر: {d['name']} → {d['tracker']}")
     if not code_sig:
         add(5, "امضای کد پیدا نشد")
     if binary.get("encrypted") is True:
@@ -641,6 +1202,30 @@ def scan_ipa(ipa_path, workdir):
                       "level_en": "low" if score < 25 else ("medium" if score < 55 else "high"),
                       "breakdown": breakdown,
                       "reasons": [b["reason"] for b in breakdown]}
+
+    # ---- Per-finding severity list (v3) ----
+    findings = []
+    for b in breakdown:
+        if b.get("points", 0) > 0:
+            findings.append({"severity": severity_for_points(b["points"]),
+                             "category": "risk", "title_fa": b["reason"],
+                             "points": b["points"]})
+    for d in dylib_analysis:
+        if d.get("unavailable"):
+            findings.append({"severity": "info", "category": "dylib",
+                             "title_fa": f"dylib {d['name']}: {d['unavailable']}", "points": 0})
+    if not (pm and not pm.get("error")) and result.get("privacy_manifest") is None:
+        findings.append({"severity": "medium", "category": "privacy-manifest",
+                         "title_fa": "مانیفست حریم خصوصی (PrivacyInfo.xcprivacy) در باندل نیست", "points": 0})
+    if result.get("provisioning") and result["provisioning"].get("expired"):
+        findings.append({"severity": "high", "category": "provisioning",
+                         "title_fa": "پروفایل provisioning منقضی شده است", "points": 0})
+    result["findings"] = sorted(
+        findings,
+        key=lambda f: {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}[f["severity"]])
+
+    # ---- Answers to the four privacy questions (Picsart-style) ----
+    result["privacy_answers"] = build_privacy_answers(result)
     return result
 
 def render_report(r):
@@ -659,6 +1244,41 @@ def render_report(r):
         for b in r["risk"]["breakdown"]:
             L.append(f"  - (+{b['points']}) {b['reason']}")
     L.append("")
+    if r.get("privacy_answers"):
+        L.append("## پاسخ به سؤال‌های حریم خصوصی")
+        L.append("")
+        for a in r["privacy_answers"]:
+            L.append(f"### {a['question_fa']}")
+            L.append(f"**پاسخ: {a['answer_fa']}**")
+            for ev in a.get("evidence", []):
+                L.append(f"- {ev}")
+            for lim in a.get("limits", []):
+                L.append(f"- ⚠️ محدودیت: {lim}")
+            L.append("")
+    if r.get("findings"):
+        L.append("## یافته‌ها بر اساس شدت")
+        sev_fa = {"critical": "بحرانی", "high": "بالا", "medium": "متوسط",
+                  "low": "کم", "info": "اطلاعاتی"}
+        for f in r["findings"]:
+            L.append(f"- [{sev_fa.get(f['severity'], f['severity'])}] {f['title_fa']}"
+                     + (f" (+{f['points']})" if f.get("points") else ""))
+        L.append("")
+    sdk = r.get("sdk_info", {})
+    if any(sdk.values()):
+        L.append("## نسخه SDK و ابزار ساخت")
+        L.append(f"- SDK: {sdk.get('sdk_name') or '—'} (build {sdk.get('sdk_build') or '—'}) — پلتفرم: {sdk.get('platform_name') or '—'} {sdk.get('platform_version') or ''}")
+        L.append(f"- Xcode: {sdk.get('xcode') or '—'} (build {sdk.get('xcode_build') or '—'}) — کامپایلر: {sdk.get('compiler') or '—'}")
+        L.append("")
+    ps = r.get("plist_security", {})
+    if ps:
+        L.append("## امنیت Info.plist (فراتر از دسترسی‌ها)")
+        L.append(f"- حالت‌های پس‌زمینه: {', '.join(ps.get('background_modes', [])) or '—'}")
+        L.append(f"- اشتراک فایل با iTunes (UIFileSharingEnabled): {ps.get('file_sharing_enabled')}")
+        L.append(f"- باز کردن اسناد در جای خود: {ps.get('supports_opening_documents_in_place')}")
+        L.append(f"- سرویس‌های Bonjour: {', '.join(ps.get('bonjour_services', [])) or '—'}")
+        L.append(f"- قابلیت‌های دستگاه موردنیاز: {', '.join(ps.get('required_device_capabilities', [])) or '—'}")
+        L.append(f"- رمزنگاری غیرمعاف (ITSAppUsesNonExemptEncryption): {ps.get('uses_non_exempt_encryption')}")
+        L.append("")
     L.append("## محدودیت مهم")
     for lim in r.get("limits", []):
         L.append(f"- {lim}")
@@ -686,7 +1306,8 @@ def render_report(r):
         L.append(f"- ردیابی (NSPrivacyTracking): {pm.get('tracking')}")
         L.append(f"- دامنه‌های ردیابی: {', '.join(pm.get('tracking_domains', [])) or '—'}")
         for c in pm.get("collected_data_types", []):
-            L.append(f"- داده: `{c['type']}` — متصل به هویت: {c['linked']}، ردیابی: {c['tracking']}، اهداف: {', '.join(c['purposes']) or '—'}")
+            sensitive = f" — داده حساس: {c['sensitive']}" if c.get("sensitive") else ""
+            L.append(f"- داده: `{c['type']}` — متصل به هویت: {c['linked']}، ردیابی: {c['tracking']}، اهداف: {', '.join(c['purposes']) or '—'}{sensitive}")
         for a in pm.get("accessed_api_types", []):
             L.append(f"- API دسترسی‌یافته: `{a['api']}` — دلایل: {', '.join(a['reasons']) or '—'}")
         if not pm.get("collected_data_types") and not pm.get("accessed_api_types"):
@@ -698,14 +1319,24 @@ def render_report(r):
     L.append(f"- AllowsArbitraryLoadsForMedia: {ats.get('allows_arbitrary_loads_for_media')}")
     L.append(f"- AllowsLocalNetworking: {ats.get('allows_local_networking')}")
     L.append(f"- Exception domains: {', '.join(ats.get('exception_domains', [])) or '—'}")
+    for d, cfg in (ats.get("exception_domain_details") or {}).items():
+        L.append(f"  - `{d}`: زیر دامنه‌ها: {cfg.get('includes_subdomains')}، http ناامن: {cfg.get('allows_insecure_http')}، "
+                 f"Forward Secrecy لازم: {cfg.get('requires_forward_secrecy')}، حداقل TLS: {cfg.get('minimum_tls') or '—'}")
     L.append("")
     L.append(f"## فریم‌ورک‌ها ({len(r.get('frameworks',[]))}) و ترکرها ({len(r.get('known_trackers',[]))})")
     for f in r.get("frameworks", []):
         L.append(f"- {f}")
     for t in r.get("known_trackers", []):
         L.append(f"- ⚠️ ترکر: {t['framework']} → {t['tracker']}")
+    for fd in r.get("framework_details", []):
+        L.append(f"- جزئیات فریم‌ورک `{fd['name']}`: bundle={fd.get('bundle_id') or '—'}، نسخه={fd.get('version') or '—'}، "
+                 f"حجم={fd.get('size_bytes', 0):,} بایت، مانیفست حریم خصوصی خودش: {fd.get('has_privacy_manifest')}")
     if r.get("dylibs"):
         L.append(f"- dylibها: {', '.join(r['dylibs'])}")
+    if r.get("static_libs"):
+        L.append(f"- کتابخانه‌های استاتیک (.a): {', '.join(r['static_libs'])}")
+    if r.get("bundles"):
+        L.append(f"- باندل‌ها (.bundle): {', '.join(r['bundles'])}")
     if r.get("app_extensions"):
         L.append(f"- App Extensions: {', '.join(r['app_extensions'])}")
     b = r.get("binary", {})
@@ -733,10 +1364,45 @@ def render_report(r):
         if not bs.get("suspicious"):
             L.append("- هیچ الگوی مشکوک شناخته‌شده‌ای در باینری پیدا نشد.")
     L.append("")
+    L.append(f"## کتابخانه‌های داینامیک (.dylib) — {r.get('dylib_count', 0)} مورد")
+    if not r.get("dylib_analysis"):
+        L.append("- هیچ فایل .dylib در باندل پیدا نشد.")
+    for d in r.get("dylib_analysis", []):
+        L.append(f"### `{d['path']}` — {d.get('size_bytes', 0):,} بایت")
+        if d.get("error") and not d.get("is_macho"):
+            L.append(f"- ⚠️ قابل تحلیل نیست: {d['error']}")
+            continue
+        L.append(f"- نوع Mach-O: CPU {d.get('cpu') or '—'}، ۶۴ بیتی: {d.get('is64')}، FAT: {d.get('fat')}")
+        L.append(f"- رمزگذاری‌شده: {d.get('encrypted')} (cryptid={d.get('cryptid')}) — حداقل iOS: {d.get('min_os') or '—'}")
+        if d.get("linked_dylibs"):
+            L.append(f"- کتابخانه‌های لینک‌شده: {', '.join(d['linked_dylibs'][:10])}")
+        if d.get("tracker"):
+            L.append(f"- ⚠️ ترکر: {d['tracker']}")
+        if d.get("unavailable"):
+            L.append(f"- ⚠️ در دسترس نیست: {d['unavailable']}")
+        else:
+            L.append(f"- رشته‌های قابل خواندن: {d.get('string_count', 0)} — ریسک: {d.get('risk_points', 0)} ({d.get('severity')})")
+            for h in d.get("suspicious", []):
+                L.append(f"  - ⚠️ {h['label_fa']} ({h['label_en']}) — {h['matches']} مورد — (+{h['points']})")
+            if not d.get("suspicious"):
+                L.append("  - هیچ الگوی مشکوک شناخته‌شده‌ای پیدا نشد.")
+    L.append("")
     L.append(f"## URL Schemes: {', '.join(r.get('url_schemes', [])) or '—'}")
     L.append(f"## دامنه‌ها ({len(r.get('domains',[]))}) و URLها ({r.get('url_count',0)})")
-    for d in r.get("domains", [])[:50]:
-        L.append(f"- {d}")
+    for d in r.get("domain_analysis", [])[:50]:
+        flags = []
+        if d.get("is_tracker_domain"):
+            flags.append("ترکر/تبلیغات")
+        if d.get("in_tracking_manifest"):
+            flags.append("در مانیفست ردیابی")
+        if d.get("http_only"):
+            flags.append("فقط http")
+        if d.get("is_ip_literal"):
+            flags.append("IP مستقیم")
+        L.append(f"- {d['domain']}" + (f" — {', '.join(flags)} (ریسک {d['risk_points']}, {d['severity']})" if flags else ""))
+    if not r.get("domain_analysis"):
+        for d in r.get("domains", [])[:50]:
+            L.append(f"- {d}")
     if r.get("insecure_http_urls"):
         L.append("")
         L.append("### ⚠️ URLهای ناامن http://")
@@ -746,10 +1412,22 @@ def render_report(r):
     L.append(f"## Entitlements ({len(r.get('entitlement_keys',[]))})")
     for k in r.get("entitlement_keys", []):
         L.append(f"- `{k}`: {r['entitlements'].get(k)}")
+    if r.get("entitlement_findings"):
+        L.append("")
+        L.append("### یافته‌های Entitlement (با شدت)")
+        sev_fa = {"critical": "بحرانی", "high": "بالا", "medium": "متوسط",
+                  "low": "کم", "info": "اطلاعاتی"}
+        for f in r["entitlement_findings"]:
+            L.append(f"- [{sev_fa.get(f['severity'], f['severity'])}] {f['label_fa']} — `{f['key']}`: {f['value']}"
+                     + (f" (+{f['points']})" if f.get("points") else ""))
     if not r.get("entitlement_keys"):
         L.append("- هیچ فایل entitlements / mobileprovision خوانایی پیدا نشد.")
     if r.get("provisioning"):
-        L.append(f"- Provisioning: {r['provisioning'].get('name')} — تیم: {r['provisioning'].get('team')} — انقضا: {r['provisioning'].get('expiration_date')}")
+        prov = r["provisioning"]
+        L.append(f"- Provisioning: {prov.get('name')} — تیم: {prov.get('team')} — نوع: {prov.get('profile_type')} — "
+                 f"انقضا: {prov.get('expiration_date')}" +
+                 (f" (منقضی شده!)" if prov.get("expired") else
+                  (f" ({prov.get('days_until_expiry')} روز مانده)" if prov.get("days_until_expiry") is not None else "")))
     L.append("")
     if r.get("errors"):
         L.append("## خطاها")
@@ -758,13 +1436,13 @@ def render_report(r):
     return "\n".join(L) + "\n"
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="SibStar IPA scanner v2 (deep scan)")
+    ap = argparse.ArgumentParser(description="SibStar IPA scanner v3 (deep scan)")
     ap.add_argument("ipa", help="Path to .ipa file")
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument("--report", dest="report_out", default=None)
     ap.add_argument("--workdir", default=None)
     args = ap.parse_args(argv)
-    workdir = args.workdir or tempfile.mkdtemp(prefix="ipa-scan-v2-")
+    workdir = args.workdir or tempfile.mkdtemp(prefix="ipa-scan-v3-")
     try:
         result = scan_ipa(args.ipa, workdir)
     except Exception as e:

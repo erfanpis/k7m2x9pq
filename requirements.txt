@@ -1,2 +1,7 @@
-# No third-party dependencies — Python standard library only (3.8+).
-# scanner.py and bot.py run with:  python3 scanner.py ...  /  python3 bot.py
+# v3: Telethon (MTProto) for 2 GB downloads — the Bot API getFile limit is 20 MB.
+# Pillow + arabic-reshaper + python-bidi render the Persian PNG summary card.
+# scanner.py itself is still standard-library only.
+telethon==1.46.0
+Pillow==11.3.0
+arabic-reshaper==3.1.0
+python-bidi==0.6.12

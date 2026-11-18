@@ -1,66 +1,122 @@
-# اسکنر IPA + ربات تلگرام — سیب‌استار
+# اسکنر IPA + ربات تلگرام — سیب‌استار (نسخه ۳)
 
 [English summary below](#english-summary)
 
 ربات تلگرام برای اسکن امنیت و حریم خصوصی فایل‌های `.ipa` (برنامه و بازی آیفون).
-یک فایل IPA در تلگرام بفرستید، ربات آن را اسکن می‌کند و به فارسی گزارش می‌دهد:
-خلاصه کوتاه در چت + گزارش کامل (`.md`) و داده (`‌.json`) به‌صورت فایل ضمیمه.
+یک فایل IPA برام بفرستید، یا لینک مستقیم دانلود یک فایل `.ipa` بدهید؛ ربات آن را
+اسکن می‌کند و به فارسی گزارش می‌دهد: خلاصه کوتاه در چت + **کارت تصویری خلاصه (PNG)**
++ گزارش کامل (`.md`) و داده (`‌.json`) به‌صورت فایل ضمیمه.
 
-فقط با کتابخانه‌ی استاندارد پایتون نوشته شده — هیچ وابستگی پولی یا اضافه‌ای لازم نیست.
+**نسخه ۳ با MTProto کار می‌کند (Telethon، مثل لینک‌یار) و فایل تا ۲ گیگابایت را
+می‌گیرد** — نسخه ۲ با Bot API فقط تا ۲۰ مگابایت می‌گرفت.
 
-## اسکن عمیق نسخه ۲ — چه چیزی بیشتر از نسخه ۱ چک می‌شود؟
+## اسکن عمیق نسخه ۳ — چه چیزی بیشتر از نسخه ۲ چک می‌شود؟
 
-| بخش | نسخه ۱ | نسخه ۲ |
+| بخش | نسخه ۲ | نسخه ۳ |
 |---|---|---|
-| دسترسی‌های Info.plist | ۲۷ کلید | ۳۳ کلید (سلامت بالینی، تقویم کامل، بلوتوث، Face ID، شبکه محلی، تشخیص گفتار و…) با برچسب فارسی |
-| مانیفست حریم خصوصی | ❌ | ✅ `PrivacyInfo.xcprivacy`: ردیابی، دامنه‌های ردیابی، نوع داده‌های جمع‌آوری‌شده (متصل/ردیابی/اهداف)، APIهای دسترسی‌یافته و دلایلشان |
-| باینری Mach-O | فقط `cryptid` | ✅ پارس کامل load commandها: کتابخانه‌های لینک‌شده، RPATH، حداقل iOS از `LC_BUILD_VERSION`، UUID، نوع CPU، FAT slices، امضای کد |
-| رشته‌های باینری | فقط URL از فایل‌های کوچک | ✅ استخراج رشته‌ها + ۱۳ الگوی مشکوک (IDFA، لوکیشن، مخاطبین، کلیپ‌بورد، کی‌چین، `dlopen`، IOKit و…) — فقط وقتی باینری رمزگذاری نشده باشد |
-| ترکرها | ۱۹ مورد | ✅ ۳۰+ مورد (Firebase، Facebook، AppsFlyer، Adjust، Branch، AdMob، Flurry، Mixpanel، Amplitude، Sentry، Bugsnag، OneSignal، Braze، Chartboost و…) |
-| امضای کد | ❌ | ✅ پوشه `_CodeSignature` + `CodeResources` + `embedded.mobileprovision` |
-| حجم باندل | ❌ | ✅ تفکیک حجم کل / باینری / فریم‌ورک‌ها |
-| امتیاز ریسک | جمع ساده | ✅ امتیاز ۰ تا ۱۰۰ با **جزئیات امتیاز هر مورد** (چند امتیاز بابت چه چیزی) |
-| مثبت کاذب | DTD اپل در `http://` می‌افتاد | ✅ دامنه‌ی `apple.com` از لیست ناامن حذف شد |
+| دسترسی‌های Info.plist | ۳۳ کلید | ۳۴ کلید + حالت‌های پس‌زمینه، اشتراک فایل، سرویس‌های Bonjour، قابلیت‌های دستگاه |
+| اطلاعات SDK و ساخت | ❌ | ✅ نام SDK، نسخه پلتفرم، Xcode، کامپایلر (کلیدهای DT*) |
+| مانیفست حریم خصوصی | ردیابی، دامنه‌ها، داده‌ها | ✅ + ریسک هر نوع داده (مثلاً «موقعیت دقیق» و «عکس/ویدیو» حساس علامت می‌خورند)، تطبیق دامنه‌های ردیابی با دامنه‌های واقعی باندل |
+| ترکرها | ۴۲ مورد (فقط framework/dylib) | ✅ ۶۵+ مورد — شامل کتابخانه‌های استاتیک (`.a`) و باندل‌ها (`.bundle`) |
+| الگوهای مشکوک باینری | ۱۳ الگو | ✅ ۳۳ الگو (HealthKit، PhotoKit، بلوتوث، NFC، Face ID، گفتار، حرکت، ptrace ضد دیباگ، اجرای پروسس، getifaddrs و…) |
+| دامنه‌ها و URLها | لیست ساده | ✅ تحلیل ریسک هر دامنه: فقط http، IP مستقیم، دامنه ترکر/تبلیغات، دامنه ردیابی مانیفست |
+| Entitlements | لیست کلیدها | ✅ تحلیل هر entitlement با شدت (دیباگ، HealthKit، HomeKit، NFC، مالتی‌کست، VPN و…) |
+| Provisioning | نام و تیم | ✅ + نوع پروفایل (development/distribution/enterprise) و بررسی انقضا |
+| ATS | چند پرچم کلی | ✅ جزئیات هر دامنه استثنا (http ناامن، Forward Secrecy، حداقل TLS، زیر دامنه‌ها) |
+| فریم‌ورک‌ها | لیست نام‌ها | ✅ جزئیات هر فریم‌ورک: bundle ID، نسخه، حجم، مانیفست حریم خصوصی خودش |
+| فایل‌های `.dylib` | فقط نام | ✅ هر dylib جداگانه تحلیل می‌شود: نوع Mach-O، رمزگذاری، کتابخانه‌های لینک‌شده، رشته‌ها/الگوها، ریسک خودش |
+| شدت یافته‌ها | فقط امتیاز | ✅ هر یافته یک شدت دارد: بحرانی / بالا / متوسط / کم / اطلاعاتی |
+| پاسخ به سؤال‌های حریم خصوصی | ❌ | ✅ چهار سؤال مستقیم با مدرک و محدودیت صادقانه (پایین ببینید) |
+
+## پاسخ به چهار سؤال حریم خصوصی
+
+گزارش نهایی (`.md`)، خلاصه چت و کارت تصویری مستقیماً به این چهار سؤال جواب می‌دهند:
+
+1. **آیا برنامه عکس‌ها/فایل‌ها را به سرور یا فضای ابری می‌فرستد؟** — بر اساس دسترسی
+   گالری، حالت‌های پس‌زمینه، دامنه‌های شبکه و ATS؛ با لیست سرورهایی که برنامه با آن‌ها
+   حرف می‌زند. تحلیل ایستا فقط «توانایی» و «آدرس سرورها» را نشان می‌دهد، نه ترافیک واقعی.
+2. **آیا سازنده‌ی ماد یا شخص ثالث می‌تواند عکس‌ها/ویدیوهای کاربر را ببیند یا دریافت کند؟**
+   — بر اساس ترکرها، دامنه‌های ترکر، http ناامن، ردیابی مانیفست و الگوهای باینری.
+3. **آیا برنامه اطلاعات عکس/فایل کاربر را جمع‌آوری می‌کند؟** — بر اساس نوع داده‌های
+   اعلام‌شده در مانیفست، دسترسی‌ها، ترکرها و SDKهای تحلیلی.
+4. **حکم نهایی** — این نسخه بررسی شده است؟ چه چیزی تأیید شد و چه چیزی قابل بررسی نیست؟
+   (مخصوصاً برای IPAهای رمزگذاری‌شده با FairPlay که تحلیل باینری‌شان ممکن نیست.)
+
+هر جواب یک کلمه‌ی حکم کوتاه، مدارک و «محدودیت صادقانه» دارد — جایی که مدرک نیست،
+گزارش صریحاً می‌گوید قابل بررسی نیست، نه اینکه چیزی جعل کند.
 
 ## محدودیت مهم — FairPlay
 
 فایل‌های IPA دانلودشده از اپ‌استور با FairPlay رمزگذاری شده‌اند.
 باینری رمزگذاری‌شده را نمی‌شود بدون رمزگشایی خواند؛ اسکنر این را تشخیص می‌دهد
 (`cryptid=1`) و بخش «رشته‌های باینری» را **«در دسترس نیست»** اعلام می‌کند،
-نه اینکه چیزی را جعل کند. برای تحلیل کامل باینری، به نسخه‌ی رمزگشایی‌شده نیاز است.
-این پروژه هیچ راهی برای دور زدن FairPlay ادعا نمی‌کند و ندارد.
+نه اینکه چیزی را جعل کند — همین قانون برای هر فایل `.dylib` رمزگذاری‌شده هم
+اعمال می‌شود (جداگانه گزارش می‌شود، نه اینکه بی‌صدا رد شود). برای تحلیل کامل
+باینری، به نسخه‌ی رمزگشایی‌شده نیاز است. این پروژه هیچ راهی برای دور زدن
+FairPlay ادعا نمی‌کند و ندارد.
+
+## کارت خلاصه‌ی تصویری (PNG)
+
+بعد از هر اسکن، یک کارت PNG تمیز ساخته می‌شود (`report_card.py` با Pillow):
+نام برنامه، Bundle ID، نسخه، امتیاز ریسک ۰ تا ۱۰۰ با رنگ مشخص (سبز/کهربایی/قرمز)،
+سطح ریسک به فارسی، حکم نهایی، پاسخ کوتاه چهار سؤال حریم خصوصی، شمارنده‌ها
+(دسترسی‌ها، ترکرها، دامنه‌ها، لینک ناامن، فایل dylib، الگوی مشکوک) و مهم‌ترین
+یافته‌ها. متن فارسی راست‌چین و با شکل‌دهی درست حروف رندر می‌شود (raqm در
+Pillow، و در غیاب آن arabic-reshaper + python-bidi). کارت هم در تلگرام به‌صورت
+عکس فرستاده می‌شود.
+
+## پاک‌سازی — فایل‌ها ذخیره نمی‌شوند
+
+هر IPA دانلودشده و هر گزارش تولیدشده فقط داخل یک پوشه‌ی موقت زندگی می‌کند.
+**بلافاصله بعد از اسکن و ارسال گزارش، فایل IPA حذف می‌شود** — و پوشه‌ی موقت
+حتی اگر دانلود، اسکن یا ارسال ناموفق باشد هم پاک می‌شود. هیچ IPA یا گزارشی
+وارد ریپو نمی‌شود و commit نمی‌شود (`.gitignore` جلوی `*.ipa`، گزارش‌های
+`*.json`/`*.md` و فایل‌های `*.session` تلگرام را می‌گیرد). این برای اینکه دیسک
+رانر گیت‌هاب اکشنز با فایل‌های ۲ گیگابایتی پر نشود.
 
 ## استفاده سریع
 
 ```bash
-# ۱) اسکنر خط فرمان
+# ۱) اسکنر خط فرمان (فقط استاندارد پایتون)
 python3 scanner.py app.ipa --json report.json --report report.md
 
-# ۲) ربات تلگرام (توکن هرگز داخل کد نیست)
+# ۲) کارت تصویری خلاصه
+python3 report_card.py app.ipa --out card.png
+
+# ۳) ربات تلگرام — نسخه ۳ به Telethon نیاز دارد (MTProto، برای ۲ گیگابایت)
+pip install -r requirements.txt
 export TELEGRAM_BOT_TOKEN='توکن-از-BotFather'
-python3 bot.py
+export TELEGRAM_API_ID='123456'        # از https://my.telegram.org
+export TELEGRAM_API_HASH='...'         # از https://my.telegram.org
+export ADMIN_USER_IDS='123456789'      # فقط آیدی عددی تلگرام خودت
+python3 bot.py --check-config   # فقط بررسی متغیرها، بدون شبکه
+python3 bot.py --check-token    # اتصال و تست توکن
+python3 bot.py                  # ربات شروع می‌شود و گوش می‌دهد
 
-# ۳) تست توکن بدون اسکن
-python3 bot.py --check-token
-
-# ۴) تست آفلاین خلاصه‌ی ربات (بدون تلگرام)
+# ۴) تست آفلاین (بدون تلگرام، بدون شبکه)
 python3 bot.py --selftest test/TestGame.ipa
 python3 test/test_bot_offline.py
+python3 test/test_scanner_v3.py
 ```
 
-در تلگرام: فایل `.ipa` را برای ربات بفرستید. حداکثر حجم فایل در تلگرام برای ربات‌ها **۲۰ مگابایت** است؛
-فایل بزرگ‌تر با پیام فارسی رد می‌شود. دستورها: `/start` و `/help`.
+در تلگرام: فایل `.ipa` را برای ربات بفرستید، یا لینک مستقیم یک فایل `.ipa` بدهید.
+حداکثر حجم فایل **۲ گیگابایت** است (محدودیت تلگرام)؛ فایل بزرگ‌تر یا غیر IPA با
+پیام فارسی رد می‌شود. برای فایل‌های بالای ۵۰ مگابایت، پیشرفت دانلود هر ۱۰٪
+گزارش می‌شود. دستورها: `/start` و `/help`. فقط ادمین (ADMIN_USER_IDS) می‌تواند
+از ربات استفاده کند؛ بقیه با پیام فارسی رد می‌شوند.
 
 ## ساختار ریپو
 
 ```
-scanner.py                  # اسکنر عمیق نسخه ۲ (اصلی)
-bot.py                      # ربات تلگرام (فقط stdlib)
-requirements.txt            # خالی — فقط استاندارد پایتون
+scanner.py                  # اسکنر عمیق نسخه ۳ (فقط stdlib)
+bot.py                      # ربات تلگرام نسخه ۳ (Telethon / MTProto)
+report_card.py              # کارت تصویری خلاصه PNG (Pillow)
+requirements.txt            # telethon, Pillow, arabic-reshaper, python-bidi
 test/
-  make_test_ipa_v2.py       # ساخت IPA مصنوعی تست (غنی‌تر از نسخه ۱)
-  test_bot_offline.py       # تست آفلاین ربات (بدون توکن، بدون شبکه)
-  TestGame.ipa              # IPA تست (رمزگذاری‌نشده) — ساخته‌شده با اسکریپت بالا
+  make_test_ipa_v2.py       # ساخت IPA مصنوعی تست (با ۲ فایل dylib: یکی سالم، یکی رمزگذاری‌شده)
+  test_bot_offline.py       # تست آفلاین ربات نسخه ۳ (بدون توکن، بدون شبکه)
+  test_scanner_v3.py        # تست اسکنر نسخه ۳ + کارت PNG
+  TestGame.ipa              # IPA تست (رمزگذاری‌نشده)
   TestGame-encrypted.ipa    # همان IPA با cryptid=1
   report-v2.json / .md       # خروجی تست
   report-v2-encrypted.json / .md
@@ -72,41 +128,55 @@ README.md / DEPLOY.md / LICENSE / .gitignore
 
 IPA مصنوعی تست (نه برنامه‌ی واقعی اپ‌استور) با `test/make_test_ipa_v2.py` ساخته و اسکن شد:
 
-- برنامه: TestGame — `com.example.testgame`، نسخه 1.2.3، حداقل iOS 15.0 (از باینری: 16.0.0)
+- برنامه: TestGame — `com.example.testgame`، نسخه 1.2.3، حداقل iOS 15.0 (از باینری: 16.0.0)، SDK iphoneos17.5، Xcode 15.4
 - **ریسک: 100/100 — بالا**
 - دسترسی‌ها (۱۱): دوربین، میکروفون، موقعیت همیشه، مخاطبین، گالری، بلوتوث، سلامت، تشخیص گفتار، Face ID، شبکه محلی، ردیابی ATT
-- مانیفست حریم خصوصی: ردیابی = بله، ۲ دامنه‌ی ردیابی، ۲ نوع داده با ردیابی مرتبط
-- ترکرها (۶): Firebase، AppsFlyer، Amplitude، Flurry، Mixpanel، Sentry
+- مانیفست حریم خصوصی: ردیابی = بله، ۲ دامنه‌ی ردیابی، ۳ نوع داده (موقعیت دقیق حساس علامت خورد)
+- ترکرها (۷): Firebase، AppsFlyer، Amplitude، Flurry، Mixpanel، Sentry، Segment
 - باینری: Mach-O ۶۴ بیتی arm64، رمزگذاری‌نشده، UUID و ۲ کتابخانه‌ی لینک‌شده، ۸ الگوی مشکوک (IDFA، لوکیشن، مخاطبین، کلیپ‌بورد، `dlopen` و…)
-- دامنه‌ها: ۵ — URL ناامن `http://`: ۲
+- فایل‌های dylib (۲): `libTest.dylib` — ۳ الگوی مشکوک، ریسک ۱۸؛ `libLocked.dylib` — رمزگذاری‌شده، تحلیل رشته‌ها در دسترس نیست
+- دامنه‌ها: ۷ — URL ناامن `http://`: ۳ (شامل یکی از dylib)
+- پاسخ‌ها: ارسال عکس به سرور «ممکن است»، دسترسی شخص ثالث «ممکن است»، جمع‌آوری اطلاعات عکس «احتمالاً»، حکم نهایی «پرخطر»
 
 نسخه‌ی رمزگذاری‌شده هم تست شد: اسکنر درست تشخیص داد `encrypted=True, cryptid=1`،
-تحلیل رشته‌ها را «در دسترس نیست» اعلام کرد و هشدار FairPlay را در گزارش آورد.
+تحلیل رشته‌ها را «در دسترس نیست» اعلام کرد، حکم نهایی «بررسی ناقص» شد، و dylib
+رمزگذاری‌شده هم جداگانه «در دسترس نیست» گزارش شد.
 
 ربات هم آفلاین تست شد: `/start` راهنمای فارسی را می‌دهد، فایل غیر IPA رد می‌شود،
-فایل بالای ۲۰ مگابایت با پیام حد تلگرام رد می‌شود، و خلاصه‌ی فارسی همان ریسک 100/100 را برمی‌گرداند.
-تست زنده با تلگرام (دانلود فایل و ارسال گزارش) به توکن معتبر نیاز دارد — فعلاً توکن ذخیره‌شده
-با خطای 404 برمی‌گردد، پس احتمالاً نامعتبر است (نگاه کنید به DEPLOY.md).
+فایل بالای ۲ گیگابایت با پیام حد تلگرام رد می‌شود، لینک غیر http(s) و لینک غیر IPA
+رد می‌شود، دانلود لینک از سرور محلی کار می‌کند، و خلاصه‌ی فارسی همان ریسک 100/100
+را با چهار پاسخ حریم خصوصی و تعداد dylib برمی‌گرداند. کارت PNG هم برای هر دو
+نسخه‌ی IPA ساخته و اعتبارسنجی شد (1200×1180).
 
 ## گیت‌هاب
 
-حساب کاربری: **erfanpis** — ریپوی پیشنهادی: `github.com/erfanpis/ipa-scanner-bot`
-(هنوز push نشده؛ برای push به تایید و دسترسی خودتان نیاز است.)
+حساب کاربری: **erfanpis** — ریپو: `github.com/erfanpis/k7m2x9pq` (پابلیک، با اسم
+بی‌معنی که با سرچ پیدا نشود). ورک‌فلو `.github/workflows/bot.yml` از قبل در ریپو
+هست و ربات را ۲۴ ساعته با الگوی لینک‌یار اجرا می‌کند (هر جاب چند ساعت، بعد خودش
+جاب بعدی را روشن می‌کند). برای جزئیات استقرار و secrets لازم، نگاه کنید به DEPLOY.md.
 
-## امنیت توکن
+## امنیت توکن و secrets
 
-- توکن فقط از متغیر محیطی `TELEGRAM_BOT_TOKEN` خوانده می‌شود.
-- توکن هرگز در کد، لاگ یا فایل‌ها ذخیره نمی‌شود.
-- اگر توکن نامعتبر باشد، ربات با پیام واضح «توکن نامعتبر است؛ از BotFather توکن جدید بگیرید» متوقف می‌شود.
+- توکن و API ID/Hash فقط از متغیر محیطی خوانده می‌شوند.
+- توکن و secrets هرگز در کد، لاگ یا فایل‌ها ذخیره نمی‌شوند.
+- فایل session تلگرام (`*.session`) در پوشه‌ی موقت سیستم ساخته می‌شود، نه در ریپو،
+  و `.gitignore` آن را هم بلاک می‌کند.
+- اگر توکن نامعتبر باشد، ربات با پیام واضح متوقف می‌شود؛ از BotFather توکن جدید بگیرید.
 
 ## <a name="english-summary"></a>English summary
 
-A Telegram bot + deep IPA scanner for SibStar (Persian iOS App Store). Send an `.ipa`
-to the bot; it replies in Persian with a risk score (0–100) summary plus full
-Markdown/JSON reports. Stdlib-only Python. v2 adds: `PrivacyInfo.xcprivacy`
-manifest parsing, full Mach-O load-command parsing (linked dylibs, min iOS, UUID,
-FAT slices), binary-string analysis with 13 suspicious-API patterns (decrypted
-binaries only), code-signature checks, 30+ tracker SDKs, and a per-item risk
-breakdown. FairPlay-encrypted App Store IPAs are detected (`cryptid=1`) and the
-binary-string section is honestly reported as unavailable — no FairPlay bypass
-is claimed or implemented. Telegram Bot API limit: 20 MB per file.
+A Telegram bot + deep IPA scanner for SibStar (Persian iOS App Store), v3.
+Send an `.ipa` file or a direct `.ipa` link; it replies in Persian with a risk
+score (0–100) summary, a PNG summary card, plus full Markdown/JSON reports.
+v3 uses Telethon (MTProto, like LinkYar) so files up to 2 GB work (v2's Bot API
+limit was 20 MB). v3 scan adds: SDK/build info, plist security (background
+modes, file sharing, Bonjour), per-data-type privacy-manifest risk, 65+
+tracker SDKs (incl. static libs), 33 suspicious binary patterns, per-domain
+risk, per-entitlement severity, provisioning type/expiry, ATS exception
+details, per-framework details, per-dylib analysis (encrypted dylibs reported
+as unavailable, never silently skipped), per-finding severity, and four
+Picsart-style privacy answers with evidence and honest limits. Downloaded
+IPAs and generated reports live only in a temp dir and are deleted right
+after the scan/report, even on failure. FairPlay-encrypted App Store IPAs are
+detected (`cryptid=1`) and the binary-string section is honestly reported as
+unavailable — no FairPlay bypass is claimed or implemented.
