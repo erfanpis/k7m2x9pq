@@ -768,6 +768,22 @@ VALID_HOST_RE = re.compile(
     r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 
 
+def safe_hostname(url):
+    """urlparse().hostname that never raises.
+
+    v9.1: a malformed URL string (e.g. an unmatched "[" in the host)
+    makes urlsplit raise ValueError("Invalid IPv6 URL"). classify_url
+    already guards this and returns "invalid" — but the ignored URLs
+    it rejected were later fed to urlparse() again unguarded (line
+    ~2696), which crashed the whole scan of the Picsart IPA. Any
+    unparseable URL simply has no hostname.
+    """
+    try:
+        return (urlparse(url).hostname or "").lower() or None
+    except Exception:
+        return None
+
+
 def classify_url(url):
     """Classify an embedded URL string.
 
@@ -832,7 +848,7 @@ def severity_for_points(points):
 def analyze_domains(domains, http_urls, tracking_domains):
     """Per-domain risk: http-only, IP literal, known tracker/ad domain,
     or listed in the privacy manifest as a tracking domain."""
-    http_hosts = {urlparse(u).hostname for u in (http_urls or []) if urlparse(u).hostname}
+    http_hosts = {safe_hostname(u) for u in (http_urls or [])} - {None}
     tracking = set(tracking_domains or [])
     out = []
     for d in sorted(domains or []):
@@ -1636,7 +1652,7 @@ def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES,
             ignored.append({"url": u, "reason": kind if kind != "network" else "docs"})
             continue
         urls.add(u)
-        host = urlparse(u).hostname
+        host = safe_hostname(u)
         if host:
             domains.add(host.lower())
         if u.startswith("http://") and host != APPLE_DTD_HOST:
@@ -1717,7 +1733,7 @@ def scan_bundle_files(app_dir):
                                 "file": str(p.relative_to(app_dir))})
                 continue
             urls.add(u)
-            host = urlparse(u).hostname
+            host = safe_hostname(u)
             if host:
                 domains.add(host.lower())
             if u.startswith("http://") and host != APPLE_DTD_HOST:
@@ -2360,7 +2376,7 @@ def scan_ipa(ipa_path, workdir):
         "file": str(ipa_path),
         **hashes_of(ipa_path),
         "size_bytes": ipa_path.stat().st_size,
-        "scanner": "sibstar-ipa-scanner 9.0 (stdlib only)",
+        "scanner": "sibstar-ipa-scanner 9.1 (stdlib only)",
         "limits": [
             "IPAهای اپ‌استور با FairPlay رمزگذاری شده‌اند؛ تحلیل رشته‌ها و الگوهای باینری بدون نسخه‌ی رمزگشایی‌شده ممکن نیست.",
             "این اسکن بدون رمزگشایی، Info.plist، مانیفست حریم خصوصی، فریم‌ورک‌ها، entitlements، ATS و URLها را می‌خواند.",
@@ -2693,9 +2709,9 @@ def scan_ipa(ipa_path, workdir):
             ignored_dedup.append(item)
     result["ignored_urls"] = ignored_dedup[:50]
     result["ignored_url_count"] = len(ignored_dedup)
-    result["ignored_domains"] = sorted({urlparse(i["url"]).hostname
-                                        for i in ignored_dedup
-                                        if urlparse(i["url"]).hostname})
+    result["ignored_domains"] = sorted({h for i in ignored_dedup
+                                        for h in [safe_hostname(i["url"])]
+                                        if h})
     pm_for_domains = result.get("privacy_manifest") or {}
     result["domain_analysis"] = analyze_domains(
         domains, http_urls, pm_for_domains.get("tracking_domains", []))
