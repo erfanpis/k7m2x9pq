@@ -1,7 +1,114 @@
 #!/usr/bin/env python3
 """
-SibStar IPA Scanner v7 — deep scan (stdlib only, no paid dependencies)
+SibStar IPA Scanner v9 — deep scan (stdlib only, no paid dependencies)
 Scans an iOS .ipa (ZIP containing Payload/*.app) WITHOUT decryption:
+
+  v9 vs v8 — THE MOD ITSELF IS NOT A RISK (store-owner product
+  decision, 2026-11-19): SibStars sells modded/unlocked IPAs
+  ("Premium Unlocked", "Patched") on purpose — a tweaked version is
+  NORMAL here, it is the product the customer buys. So:
+  - The +25 tampering component is GONE. A modded app whose added
+    parts have no server scores EXACTLY like the clean original
+    (TamperedCollage 19 = CleanCollage 19; Mercury/WeatherNowTampered
+    0 = WeatherNow 0). The score is driven only by ACTUAL danger.
+  - Added-part findings now score only as EXFILTRATION risk:
+    unknown server of an added part = 15, upload endpoint present
+    together with that server (the sending path is complete) = 7,
+    keychain access inside an added part that also has a server = 3
+    (cap 25, same category cap). A dangerous app — added part with
+    its own unknown server + a real photo-upload endpoint — still
+    scores HIGH (DangerousCollage 73 = original 48 + exfiltration 25).
+    Keychain/dyld/runtime patterns inside an added part with NO
+    server are info only (0 points).
+  - No level/verdict floor for the mod alone any more: the level and
+    the final verdict follow the SCORE (and confirmed exfiltration:
+    server + upload endpoint together floor the level at medium and
+    make the verdict "risky"). A modded app with no exfiltration
+    evidence is "ok" with the headline "مشکلی پیدا نشد؛ با خیال
+    راحت استفاده کنید".
+  - The word "دستکاری" is REMOVED from all customer-facing output
+    (card, bot summary, report verdicts/answers) per the owner's
+    explicit "دستکاری شده رو بردار". The unlocked fact is stated
+    ONCE, neutrally, as "نسخه آنلاک شده" (grey/blue pill "بله",
+    never red). The verdict is about DATA SAFETY, not about the mod:
+    no exfiltration evidence -> "مشکلی پیدا نشد؛ با خیال راحت
+    استفاده کنید"; server + upload endpoint confirmed -> "این نسخه
+    اطلاعات شما را به سروری ناشناس می‌فرستد؛ نصب نکنید". The
+    per-dylib technical analysis (for Erfan only) still describes
+    the added dylibs factually, and its conclusion is "شواهدی از
+    ارسال داده نیست" vs "ارسال داده تأیید شد".
+  - The core requirement is UNCHANGED: does the added part send data
+    to the third party itself? That is still the whole point; only
+    the treatment of the mod itself changed.
+
+  v8 vs v7 — ASK ONLY WHAT THE APP CAN ACTUALLY DO, SCORE ONLY WHAT
+  IS ACTUALLY WRONG (the Mercury Weather lesson):
+  - Photo questions are asked ONLY when the app can READ photos
+    (NSPhotoLibraryUsageDescription, or direct PHPhotoLibrary use).
+    An app with add-only permission (NSPhotoLibraryAddUsageDescription
+    — save a screenshot) CANNOT read the user's photos, so the card
+    and the report say so in one plain line instead of planting
+    photo-theft fear with three photo questions. Read vs add is
+    distinguished everywhere: add-only is NOT read access.
+  - Context-aware scoring: an API/permission that IS the app's own
+    job scores 0 ("موردنیاز برای کار اصلی برنامه") — location in a
+    weather/maps app, camera in a camera app, PhotoKit in a photo
+    editor, motion in a fitness app. dlopen/dlsym and motion-sensor
+    symbols in the MAIN binary are info only (0 points); they only
+    count inside an injected dylib (via the single tampering line).
+  - Decisive wording, no hedging left: "جمع‌آوری عکس اعلام نشده
+    است" is now "این برنامه اطلاعات عکس جمع نمی‌کند". Every answer
+    string was audited for "اعلام نشده" / "ممکن است" hedging.
+  - A confirmed tamper can never read "no serious signs": tampering
+    floors the risk level at "متوسط" and the final verdict at
+    "caution", even when the original-app score is low.
+  - Domain counts on the customer card are gone: a bare "26 domains"
+    reads as danger to a non-technical customer. The card shows the
+    tracker count instead; the .md report groups domains by kind
+    (weather services, Apple, tracker, CDN, other).
+  - The Crsel lesson (v7 scored the ORIGINAL collage app 49/100,
+    mostly false positives):
+    * "Insecure http" URLs are validated, not just counted: CRL/OCSP
+      endpoints (certificate revocation checks, http by design),
+      font licence/attribution strings (creativecommons, fontstruct,
+      fontforge, SIL OFL) and URL shorteners in attribution text are
+      ignored; malformed concatenations (a second "://" inside the
+      string, an uppercase letter in the host, a reserved TLD like
+      .invalid) are rejected as invalid. Only a real http URL the app
+      could actually call counts.
+    * FacebookClientToken in Info.plist is a PUBLIC client token by
+      Facebook SDK design — meant to be embedded, never scored as a
+      hardcoded secret. The plist-secret heuristic skips public
+      client-token / app-id keys.
+    * com.apple.developer.kernel.extended-virtual-addressing is a
+      normal Apple entitlement for memory-heavy photo/video editors:
+      0 points.
+    * Each tracker is counted ONCE: a tracker domain adds points
+      only when its tracker family was not already counted via the
+      detected SDK — api.amplitude.com + api2.amplitude.com +
+      Amplitude SDK is one tracker fact, not three.
+    * Generic main-binary patterns (pasteboard, keychain, sysctl,
+      IOKit, carrier info, network interfaces, dyld introspection)
+      are info only (0 points) in the main binary — they are in every
+      large app. They still count inside an injected dylib.
+      Audio recording/session (AVAudioRecorder/AVAudioSession) and
+      runtime class enumeration (objc_copyClassList/objc_getClass)
+      are the same class in the main binary — every media app sets
+      up an audio session, and every analytics SDK enumerates
+      classes — so they are info only in the main binary too.
+    * Snap Kit and TikTok SDK are sharing/login SDKs, not trackers —
+      they are not listed as trackers, and their login domains are
+      not tracker domains.
+  - Dangerous vs harmless, proven by fixtures (test/
+    make_calibration_ipa.py): a clean collage-like app scores LOW;
+    the same app with two injected tweak dylibs keeps its original
+    score and adds exactly the +25 tampering line; a dangerous app —
+    tweak dylib with its OWN unknown server plus a real photo-upload
+    endpoint — scores HIGH and answers the photo questions YES with
+    the server as evidence. That is the one case where YES is honest:
+    the tweak has both a channel (its own server) and the upload
+    endpoint. Photo permission + analytics servers alone is still
+    never proof of sending.
 
   v7 vs v6 — DECISIVE verdicts, no hedging:
   - The "capability" verdict is GONE. If static analysis finds no
@@ -183,8 +290,9 @@ KNOWN_TRACKERS = {
     "ironsource": "ironSource",
     "unityads": "Unity Ads",
     "applovin": "AppLovin",
-    "tiktok": "TikTok SDK",
-    "snapkit": "Snap Kit",
+    # v8 (Crsel): TikTok SDK and Snap Kit are SHARING/LOGIN SDKs, not
+    # trackers — do not list them as trackers. (Pangle, TikTok's ad
+    # network, stays: it IS an ads SDK.)
     "chartboost": "Chartboost",
     "vungle": "Vungle / Liftoff",
     "mopub": "MoPub",
@@ -301,6 +409,181 @@ GENERIC_API_PATTERNS = [
      None),  # note set per-binary below: on-device forced or not
 ]
 
+# v8 — app purpose: an API/permission that IS the app's own job is not
+# a risk. Purpose is detected from STRONG signals only (a purpose
+# entitlement, a purpose framework, or the app's own name/bundle id)
+# — a framework merely linked by a dependency does not count, and a
+# generic keyword in a random string does not count either.
+#   "patterns": SUSPICIOUS_PATTERNS regexes that are the app's job
+#   "permissions": permission keys that are the app's job
+LOCATION_KEYS_ALL = {
+    "NSLocationUsageDescription",
+    "NSLocationWhenInUseUsageDescription",
+    "NSLocationAlwaysUsageDescription",
+    "NSLocationAlwaysAndWhenInUseUsageDescription",
+    "NSLocationTemporaryUsageDescriptionDictionary",
+    "NSLocationDefaultAccuracyReducedUsageDescription",
+}
+APP_PURPOSES = {
+    "weather": {
+        "label_fa": "هواشناسی",
+        "entitlements": {"com.apple.developer.weatherkit"},
+        "frameworks": {"WeatherKit.framework"},
+        "keywords": ("weather", "forecast", "هواشناسی", "آب‌وهوا", "آب و هوا"),
+        "patterns": (r"CLLocationManager",),
+        "permissions": LOCATION_KEYS_ALL,
+    },
+    "maps": {
+        "label_fa": "نقشه و مسیریابی",
+        "entitlements": set(),
+        "frameworks": {"MapKit.framework"},
+        "keywords": ("map", "navigation", "نقشه", "مسیریاب", "مسیریابی"),
+        "patterns": (r"CLLocationManager",),
+        "permissions": LOCATION_KEYS_ALL,
+    },
+    "camera": {
+        "label_fa": "دوربین",
+        "entitlements": set(),
+        "frameworks": set(),
+        "keywords": ("camera", "دوربین"),
+        "patterns": (r"AVCaptureDevice|AVCaptureSession",),
+        "permissions": {"NSCameraUsageDescription"},
+    },
+    "photo": {
+        "label_fa": "عکس",
+        "entitlements": set(),
+        "frameworks": set(),
+        "keywords": ("photo", "عکس"),
+        "patterns": (r"PHPhotoLibrary|PHAsset",),
+        "permissions": {"NSPhotoLibraryUsageDescription"},
+    },
+    "fitness": {
+        "label_fa": "سلامت و تناسب اندام",
+        "entitlements": {"com.apple.developer.healthkit"},
+        "frameworks": {"HealthKit.framework"},
+        "keywords": ("fitness", "health", "سلامت", "تناسب اندام", "ورزش"),
+        "patterns": (r"CMMotionManager|CMSensorRecorder", r"HKHealthStore"),
+        "permissions": {"NSHealthShareUsageDescription",
+                        "NSHealthUpdateUsageDescription",
+                        "NSHealthClinicalUsageDescription",
+                        "NSMotionUsageDescription"},
+    },
+}
+
+# v8 — patterns that are info-only in the MAIN binary, whatever the
+# app does: dlopen/dlsym appears in countless legitimate binaries
+# (dynamic loading is how iOS itself works), and a motion-sensor
+# symbol alone proves nothing. They only count inside an injected
+# dylib, where they feed the single tampering line.
+# v8 (Crsel): the same applies to the other generic system-API
+# patterns — pasteboard, keychain, sysctl, IOKit, carrier info,
+# network interfaces and dyld introspection are in every large app
+# (SDKs and frameworks use them); in the main binary they are info
+# only, 0 points. Inside an injected dylib they still count.
+# Audio recording/session and runtime class enumeration are the same
+# class in the main binary: every media app sets up an audio session
+# (AVAudioSession) and every analytics SDK enumerates classes
+# (objc_copyClassList) — presence in the main binary proves nothing.
+MAIN_BINARY_INFO_ONLY = (
+    r"dlopen|dlsym", r"CMMotionManager|CMSensorRecorder",
+    r"UIPasteboard|generalPasteboard", r"SecItemCopyMatching|SecItemAdd",
+    r"sysctlbyname|sysctl\(", r"IOKit|IOServiceGetMatchingServices",
+    r"CTCarrier|CTTelephonyNetworkInfo", r"getifaddrs",
+    r"_dyld_get_image_name|dyld_get_image",
+    r"AVAudioRecorder|AVAudioSession", r"objc_copyClassList|objc_getClass",
+)
+
+
+def detect_app_purpose(info, entitlements, frameworks, linked_dylibs):
+    """Detect what the app is FOR, from strong signals only.
+
+    Returns {"ids": [...], "label_fa": "هواشناسی" | None}. A purpose
+    is detected when ANY of its strong signals fires: a purpose
+    entitlement, a purpose framework, or a purpose keyword in the
+    app's own display name / bundle id. Linked system frameworks
+    alone (e.g. CoreLocation, linked by many apps) never count.
+    """
+    name = " ".join(str(x) for x in (
+        info.get("CFBundleDisplayName") or "",
+        info.get("CFBundleName") or "",
+        info.get("CFBundleIdentifier") or "")).lower()
+    ent_keys = set(entitlements or {})
+    fw_names = set(frameworks or [])
+    linked = set(linked_dylibs or [])
+    found = []
+    for pid, spec in APP_PURPOSES.items():
+        if spec["entitlements"] & ent_keys:
+            found.append(pid)
+            continue
+        if spec["frameworks"] & fw_names:
+            found.append(pid)
+            continue
+        if spec["frameworks"] and any(
+                f"/{fw}" in l or l.endswith("/" + fw)
+                for fw in spec["frameworks"] for l in linked):
+            found.append(pid)
+            continue
+        if any(kw.lower() in name for kw in spec["keywords"]):
+            found.append(pid)
+    label = None
+    if found:
+        label = "، ".join(APP_PURPOSES[p]["label_fa"] for p in found)
+    return {"ids": found, "label_fa": label}
+
+
+def _purpose_patterns(purpose):
+    """SUSPICIOUS_PATTERNS regexes that are the app's own job."""
+    out = set()
+    for pid in (purpose or {}).get("ids", []):
+        out.update(APP_PURPOSES[pid]["patterns"])
+    return out
+
+
+def _purpose_permissions(purpose):
+    """Permission keys that are the app's own job."""
+    out = set()
+    for pid in (purpose or {}).get("ids", []):
+        out.update(APP_PURPOSES[pid]["permissions"])
+    return out
+
+
+# Domain groups for the report (v8): a bare "26 domains" number scares
+# a non-technical reader, so the .md report labels domains by kind.
+# Grouping is heuristic (name-based) and is labelled as such.
+DOMAIN_GROUP_KEYWORDS = [
+    ("سرویس هواشناسی", ("noaa", "bom.gov", "foreca", "rainviewer",
+                         "openweather", "meteostat", "weather", "metoc",
+                         "nhc", "nasa.gov", "arcgis", "fire.ca",
+                         "dfo-mpo", "charts.gc", "gov.bc", "cfs.nrcan")),
+    ("اپل", ("apple.com",)),
+    ("CDN", ("cdn", "cloudfront", "akamai", "cloudflare")),
+]
+
+
+def _domain_group(domain):
+    """Heuristic kind label for one domain (weather service, Apple,
+    tracker/ads, CDN, or other)."""
+    low = (domain or "").lower()
+    if any(low.endswith("." + s) or low == s or s in low
+           for s in TRACKER_DOMAIN_SUFFIXES):
+        return "ترکر/تبلیغات"
+    for label, keywords in DOMAIN_GROUP_KEYWORDS:
+        if any(k in low for k in keywords):
+            return label
+    return "سایر"
+
+
+def group_domains(domains):
+    """Count domains per kind label, most common first."""
+    counts = {}
+    for d in (domains or []):
+        g = _domain_group(d)
+        counts[g] = counts.get(g, 0) + 1
+    order = {"سرویس هواشناسی": 0, "اپل": 1, "ترکر/تبلیغات": 2,
+             "CDN": 3, "سایر": 4}
+    return dict(sorted(counts.items(),
+                       key=lambda kv: (order.get(kv[0], 9), -kv[1])))
+
 # Weak-crypto patterns (MobSF-style SAST rules, static strings only).
 # Presence in strings does NOT prove the code path is reachable — these
 # are low-severity notes, never a verdict on their own.
@@ -400,7 +683,10 @@ TRACKER_DOMAIN_SUFFIXES = [
     "segment.com", "segment.io", "fullstory.com", "instabug.com",
     "appcenter.ms", "appmetrica.yandex", "yandexmetrica", "revenuecat.com",
     "api.revenuecat.com", "pangle.io", "mintegral.com", "moloco.com",
-    "airbridge.io", "snapchat.com", "tiktok.com", "api.tiktok.com",
+    "airbridge.io",
+    # v8 (Crsel): tiktok.com / snapchat.com are the TikTok / Snap Kit
+    # LOGIN/SHARING endpoints, not tracker domains — removed with the
+    # SDKs above.
 ]
 
 # Entitlement key -> (Persian label, severity, risk points)
@@ -423,7 +709,9 @@ SENSITIVE_ENTITLEMENTS = {
     "com.apple.developer.default-data-protection": ("محافظت داده پیش‌فرض", "info", 0),
     "com.apple.developer.associated-appclip-app-identifiers": ("App Clip مرتبط", "low", 0),
     "com.apple.security.application-groups": ("گروه اپلیکیشن (اشتراک داده بین برنامه‌ها)", "low", 0),
-    "com.apple.developer.kernel.extended-virtual-addressing": ("آدرس‌دهی مجازی گسترده کرنل", "medium", 3),
+    # v8 (Crsel): a normal Apple entitlement for memory-heavy
+    # photo/video editors — 0 points, not a risk.
+    "com.apple.developer.kernel.extended-virtual-addressing": ("آدرس‌دهی مجازی گسترده کرنل", "low", 0),
     "com.apple.developer.playable-content": ("محتوای قابل پخش", "info", 0),
     "com.apple.developer.usernotifications.filtering": ("فیلتر نوتیفیکیشن", "low", 0),
 }
@@ -458,6 +746,24 @@ DOCS_HOSTS = {
     "stackoverflow.com", "www.adobe.com", "adobe.com",
     "www.bendingspoons.com", "bendingspoons.com",
 }
+# v8 (Crsel) — certificate-revocation endpoints: CRL/OCSP checks are
+# http BY DESIGN (they fetch revocation lists for certificates), never
+# a data send by the app. Font licence / attribution hosts: font files
+# embed their licence text and designer homepage links — they are not
+# endpoints the app calls. URL shorteners: redirect links in
+# attribution strings, not data endpoints.
+CRL_OCSP_HOST_PREFIXES = ("crl.", "ocsp.")
+LICENSE_HOSTS = {
+    "creativecommons.org", "fontstruct.com", "fontforge.sf.net",
+    "scripts.sil.org", "dharmatype.com",
+}
+LICENSE_PATH_PREFIXES = ("/licenses/", "/OFL")
+SHORTENER_HOSTS = {
+    "goo.gl", "bit.ly", "t.co", "tinyurl.com", "ow.ly", "is.gd",
+    "buff.ly", "cutt.ly", "rebrand.ly", "shorturl.at",
+}
+# Reserved TLDs that never resolve to a real server (RFC 2606).
+RESERVED_TLDS = {"invalid", "example", "test", "localhost"}
 VALID_HOST_RE = re.compile(
     r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 
@@ -468,8 +774,24 @@ def classify_url(url):
     Returns one of: "network" (a real network endpoint),
     "namespace" (XML/XMP/SVG namespace identifier),
     "docs" (documentation / homepage string, not an API call),
-    "invalid" (not a usable host at all, e.g. "$").
+    "crl" (certificate-revocation check — CRL/OCSP, http by design),
+    "license" (font licence / attribution string, not an endpoint),
+    "shortener" (redirect link in attribution text, not an endpoint),
+    "invalid" (not a usable host at all, e.g. "$", or a malformed
+    concatenation such as "http://a.comhttp://a.comThis").
     """
+    # v8 (Crsel): a real URL never contains "://" twice — two strings
+    # glued together by a font file ("http://dharmatype.comhttp://…")
+    # — and never has an uppercase letter in the host
+    # ("http://fontstruct.fontshop.comSD"). Both are malformed
+    # concatenations, not endpoints.
+    if url.count("://") > 1:
+        return "invalid"
+    raw_host = ""
+    if "://" in url:
+        raw_host = url.split("://", 1)[1].split("/")[0].split("?")[0].split("#")[0]
+    if any(c.isupper() for c in raw_host):
+        return "invalid"
     try:
         host = (urlparse(url).hostname or "").lower()
         path = urlparse(url).path or ""
@@ -477,6 +799,15 @@ def classify_url(url):
         return "invalid"
     if not host or not VALID_HOST_RE.match(host):
         return "invalid"
+    if host.rsplit(".", 1)[-1] in RESERVED_TLDS:
+        return "invalid"
+    if host.startswith(CRL_OCSP_HOST_PREFIXES) or path.lower().endswith(".crl"):
+        return "crl"
+    if (any(host == h or host.endswith("." + h) for h in LICENSE_HOSTS)
+            or any(path.startswith(p) for p in LICENSE_PATH_PREFIXES)):
+        return "license"
+    if host in SHORTENER_HOSTS:
+        return "shortener"
     if host in NAMESPACE_HOSTS:
         return "namespace"
     if any(path.startswith(p) for p in NAMESPACE_PATH_PREFIXES):
@@ -531,6 +862,19 @@ def analyze_domains(domains, http_urls, tracking_domains):
             "reasons_fa": reasons,
         })
     return out
+
+
+def _tracker_family(domain):
+    """Tracker family of a tracker domain: the second-level label of
+    the matched TRACKER_DOMAIN_SUFFIXES entry — e.g. api.eu.amplitude.com
+    and api2.amplitude.com are both the "amplitude" family, one tracker
+    fact, not two. Returns None when the domain is not a tracker domain."""
+    low = (domain or "").lower()
+    for s in TRACKER_DOMAIN_SUFFIXES:
+        if low == s or low.endswith("." + s):
+            parts = s.split(".")
+            return parts[-2] if len(parts) >= 2 else parts[0]
+    return None
 
 
 def analyze_entitlements(ent):
@@ -679,6 +1023,44 @@ def _photo_upload_domains(domains):
     return out
 
 
+def _exfiltration_evidence(r):
+    """Exfiltration evidence from the ADDED parts of an unlocked
+    version (v9): the only thing about the added parts that can ever
+    be a risk is whether they send data to a third party themselves.
+
+    Derived ONLY from facts already in the result dict (so it stays
+    correct when a caller rebuilds answers from a modified result):
+      unknown_servers   — domains of added dylibs the original app
+                          never talks to (and that are not known trackers)
+      upload_domains    — photo/file upload or cloud-storage endpoints
+                          anywhere in the bundle
+      keychain_in_tweak — keychain access inside an added dylib
+      confirmed         — the sending path is complete: the added part
+                          has its OWN unknown server AND an upload
+                          endpoint exists. That is the ONE case where
+                          "photos are sent" is honest. A server alone
+                          is a channel, not proof; an upload endpoint
+                          alone (the original app's own storage) is
+                          not the third party receiving data.
+    """
+    tamp = r.get("tampering") or {}
+    unknown = list(tamp.get("unknown_tweak_servers") or [])
+    upload = _photo_upload_domains(r.get("domains", []))
+    injected_names = {d.get("name")
+                      for d in tamp.get("injected_dylibs", [])}
+    keychain = any(
+        h.get("label_fa") == "دسترسی به کی‌چین"
+        for d in (r.get("dylib_analysis") or [])
+        if d.get("name") in injected_names
+        for h in (d.get("suspicious") or []))
+    return {"unknown_servers": unknown,
+            "upload_domains": upload,
+            "has_unknown_server": bool(unknown),
+            "has_upload_endpoint": bool(upload),
+            "keychain_in_tweak": bool(keychain),
+            "confirmed": bool(unknown and upload)}
+
+
 def _plain_data_kind(dtype):
     """Plain-Persian name for a manifest collected-data type (no raw
     NSPrivacyCollectedDataType constants in user-facing answer text)."""
@@ -712,24 +1094,53 @@ def build_privacy_answers(r):
     trackers = r.get("known_trackers", [])
     encrypted = r.get("binary", {}).get("encrypted") is True
     tamp = r.get("tampering") or {}
-    photo_perm = bool(perms & {"NSPhotoLibraryUsageDescription",
-                               "NSPhotoLibraryAddUsageDescription"})
+    # v8 — photo READ vs ADD: only an app that can READ photos gets
+    # the three photo questions. Add-only (save a screenshot) is NOT
+    # read access, and an app with no photo access at all gets one
+    # plain "does not apply" answer instead of three scary questions.
+    # Fallback (dicts built before v8): the read key means read access.
+    if "photo_read_access" in r:
+        photo_read = bool(r["photo_read_access"])
+        photo_add_only = r.get("photo_access") == "add-only"
+    else:
+        photo_read = "NSPhotoLibraryUsageDescription" in perms
+        photo_add_only = (not photo_read
+                          and "NSPhotoLibraryAddUsageDescription" in perms)
     upload_domains = _photo_upload_domains(domains)
+    # v8 (calibration): the ONE case where YES is honest — the tweak
+    # has its OWN unknown server AND the app has a real photo-upload
+    # endpoint. The tweak has both a channel (its server) and the
+    # upload endpoint, so the photo answers are "confirmed" with the
+    # server as evidence. Photo permission + analytics servers alone
+    # is still never proof (see below); an unknown server alone,
+    # without an upload endpoint, is a channel, not proof either.
+    _unknown_servers = tamp.get("unknown_tweak_servers") or []
+    _dangerous = bool(upload_domains and _unknown_servers)
 
-    # ---- Q5 first (the user's main question): tampering ----
-    # v7: "confirmed" needs 2+ independent signals; one signal is
-    # "suspicious", never a confirmed verdict on its own.
+    # ---- Q5 first (the user's main question): is this version unlocked,
+    # and does it send data to an unknown server? ----
+    # v9: the question is about the UNLOCKED version, not "tampering".
+    # The verdict answers the unlocked part (confirmed = yes, this
+    # version has added parts; no-evidence = no, it is the original);
+    # the ANSWER text carries the data-safety part, because that is
+    # what the verdict is about now. The word for the mod is
+    # "آنلاک شده" — never a scary label.
     if tamp.get("verdict") == "tampered":
         q5_verdict = "confirmed"
-        q5_short = (f"تأیید شد — {tamp.get('injected_dylib_count', 0)} dylib تزریقی "
-                     "(MobileSubstrate) در باندل است")
+        if _dangerous:
+            q5_short = "بله — آنلاک شده است؛ عکس‌ها به سرور ناشناس فرستاده می‌شوند"
+        elif _unknown_servers:
+            q5_short = ("بله — آنلاک شده است؛ با سرور ناشناس حرف می‌زند ولی "
+                        "مدرکی از ارسال عکس نیست")
+        else:
+            q5_short = ("بله — آنلاک شده است؛ داده‌ای به سرور ناشناس "
+                        "فرستاده نمی‌شود")
     elif tamp.get("verdict") == "suspicious":
         q5_verdict = "suspicious"
-        q5_short = ("مشکوک — یک نشانه‌ی دستکاری پیدا شد؛ برای حکم قطعی "
-                     "نشانه‌ی دوم لازم است")
+        q5_short = ("به نظر می‌رسد آنلاک شده باشد؛ مدرکی از ارسال داده نیست")
     else:
         q5_verdict = "no-evidence"
-        q5_short = "شواهدی از دستکاری پیدا نشد"
+        q5_short = "نه — نسخه‌ی اصلی است؛ بخش اضافه‌ای پیدا نشد"
     q5_evidence = [tamp.get("server_note_fa", "")]
     q5_limits = []  # v7: no per-answer limit lines (see module header)
 
@@ -740,7 +1151,13 @@ def build_privacy_answers(r):
     # Photo permission + analytics servers (adjust-skadnetwork,
     # firebaselogging, lokalise OTA, firebaseio) is NOT evidence of
     # photo upload.
-    if upload_domains:
+    if _dangerous:
+        q1_verdict = "confirmed"
+        q1_short = "بله — عکس‌ها به سرور ناشناس فرستاده می‌شوند"
+        q1_evidence = [f"بخش اضافه با سرور ناشناخته‌ی {', '.join(_unknown_servers)} حرف "
+                       f"می‌زند و برنامه نقطه‌ی آپلود عکس "
+                       f"({', '.join(upload_domains)}) دارد؛ عکس‌ها به آن سرور می‌رسند."]
+    elif upload_domains:
         q1_verdict = "no-evidence"
         q1_short = "نه — شواهدی از ارسال عکس نیست"
         q1_evidence = [f"نقطه‌ی آپلود/ذخیره‌ی ابری هست "
@@ -748,21 +1165,19 @@ def build_privacy_answers(r):
                        "عکسی به آن فرستاده شده باشد."]
     else:
         q1_verdict = "no-evidence"
-        q1_short = "نه — نمی‌فرسته؛ نقطه‌ی آپلودی نیست"
-        if photo_perm and domains:
-            q1_evidence = ["دسترسی به گالری عکس اعلام شده است، ولی هیچ‌کدام از "
-                           f"{len(domains)} سروری که برنامه با آن‌ها حرف می‌زند "
-                           "جای آپلود عکس نیست؛ بدون نقطه‌ی آپلود، عکسی "
-                           "فرستاده نمی‌شود."]
-        elif photo_perm:
-            q1_evidence = ["دسترسی به گالری عکس اعلام شده است، ولی هیچ سروری "
-                           "در باندل پیدا نشد؛ بدون سرور، عکسی فرستاده نمی‌شود."]
-        elif domains:
-            q1_evidence = ["دسترسی به گالری عکس اعلام نشده است و هیچ نقطه‌ی "
-                           "آپلودی پیدا نشد."]
+        q1_short = "نه — نمی‌فرسته؛ جایی برای فرستادن عکس نیست"
+        # v8: this branch only runs when the app CAN read photos, so
+        # the evidence says "read access" — add-only never reaches
+        # here (it gets the not-applicable answer instead).
+        if domains:
+            q1_evidence = ["دسترسی خواندن گالری عکس اعلام شده است، ولی "
+                           f"هیچ‌کدام از {len(domains)} سروری که برنامه با "
+                           "آن‌ها حرف می‌زند جای آپلود عکس نیست؛ بدون "
+                           "نقطه‌ی آپلود، عکسی فرستاده نمی‌شود."]
         else:
-            q1_evidence = ["دسترسی به گالری عکس اعلام نشده است و هیچ سروری "
-                           "در باندل پیدا نشد."]
+            q1_evidence = ["دسترسی خواندن گالری عکس اعلام شده است، ولی هیچ "
+                           "سروری در باندل پیدا نشد؛ بدون سرور، عکسی "
+                           "فرستاده نمی‌شود."]
     q1_limits = []
 
     # ---- Q2: could the mod maker / a third party see user photos/videos? ----
@@ -773,16 +1188,23 @@ def build_privacy_answers(r):
     # unknown tweak server is a channel, not proof that photos went
     # to it — the answer stays "no evidence", and the server itself
     # is already named in the tampering verdict and the risk score.
-    if tamp.get("tampered"):
+    if _dangerous:
+        q2_verdict = "confirmed"
+        q2_short = "بله — عکس‌ها به دست سازنده‌ی نسخه‌ی آنلاک می‌رسد"
+        q2_evidence = [f"بخش اضافه با سرور ناشناخته‌ی {', '.join(_unknown_servers)} حرف "
+                       f"می‌زند و برنامه نقطه‌ی آپلود عکس "
+                       f"({', '.join(upload_domains)}) دارد؛ عکس‌ها می‌توانند "
+                       "به آن سرور برسند."]
+    elif tamp.get("tampered"):
         q2_verdict = "no-evidence"
         unknown = tamp.get("unknown_tweak_servers") or []
         if unknown:
             q2_short = "نه — شواهدی از دیدن یا دریافت عکس نیست"
-            q2_evidence = [f"توئیک با سرور ناشناخته‌ی {', '.join(unknown)} حرف "
+            q2_evidence = [f"بخش اضافه با سرور ناشناخته‌ی {', '.join(unknown)} حرف "
                            "می‌زند، ولی مدرکی نیست که عکسی به آن فرستاده شده باشد."]
         else:
             q2_short = "نه — نمی‌فرسته؛ سروری برای ارسال نیست"
-            q2_evidence = ["توئیک در همان پروسس برنامه اجرا می‌شود، ولی در "
+            q2_evidence = ["بخش اضافه در همان پروسس برنامه اجرا می‌شود، ولی در "
                            "رشته‌های dylibها هیچ سروری پیدا نشد؛ بدون سرور، "
                            "جایی برای فرستادن عکس نیست."]
     elif trackers:
@@ -794,7 +1216,7 @@ def build_privacy_answers(r):
     else:
         q2_verdict = "no-evidence"
         q2_short = "نه — شواهدی نیست"
-        q2_evidence = ["نه دستکاری تأیید شد، نه ترکر/SDK شناخته‌شده‌ای پیدا شد."]
+        q2_evidence = ["نه بخش اضافه‌ای تأیید شد، نه ترکر/SDK شناخته‌شده‌ای پیدا شد."]
     if encrypted:
         q2_evidence = [q2_evidence[0] + " باینری رمزگذاری‌شده است؛ الگوهای "
                        "باینری اصلی بررسی نشد."]
@@ -824,81 +1246,111 @@ def build_privacy_answers(r):
         else:
             how = "بدون اتصال به هویت و بدون ردیابی، فقط برای کارکرد برنامه"
         q3_verdict = "confirmed"
-        q3_short = "تأیید شد — در مانیفست اعلام شده است"
+        q3_short = "تأیید شد — سازنده اعلام کرده است که اطلاعات عکس جمع می‌کند"
         q3_evidence = [f"سازنده در مانیفست اعلام کرده «{kinds}» جمع می‌کند، {how}."]
     elif collected or analytics:
         q3_verdict = "no-evidence"
-        q3_short = "نه — جمع‌آوری عکس اعلام نشده است"
+        # v8: decisive, no hedging — "اعلام نشده است" implied it might
+        # still collect. When no photo type is declared and there is
+        # no read access evidence, the app does not collect photo info.
+        q3_short = "نه — این برنامه اطلاعات عکس جمع نمی‌کند"
         if analytics:
-            q3_evidence = [f"مانیفست {len(collected)} نوع داده اعلام می‌کند، ولی "
+            q3_evidence = [f"مانیفست {len(collected)} نوع داده دارد، ولی "
                            "«عکس/ویدیو» در آن نیست؛ ترکرهای تحلیلی رویداد و "
                            "شناسه می‌فرستند، نه عکس."]
         else:
-            q3_evidence = [f"مانیفست {len(collected)} نوع داده اعلام می‌کند، ولی "
+            q3_evidence = [f"مانیفست {len(collected)} نوع داده دارد، ولی "
                            "«عکس/ویدیو» در آن نیست."]
     else:
         q3_verdict = "no-evidence"
-        q3_short = "نه — جمع‌آوری عکس اعلام نشده است"
-        q3_evidence = ["مانیفست حریم خصوصی هیچ نوع داده‌ی جمع‌آوری‌شده‌ای اعلام "
-                       "نکرده است."]
+        q3_short = "نه — این برنامه اطلاعات عکس جمع نمی‌کند"
+        q3_evidence = ["مانیفست برنامه هیچ داده‌ی جمع‌آوری‌شده‌ای ندارد."]
     q3_limits = []  # v7: no per-answer limit lines (see module header)
 
     # ---- Q4: clear verdict — what was verified, what could not be verified ----
-    # v5: the final verdict follows the risk SCORE, not the tampering
-    # flag alone — otherwise a medium-score app with a confirmed tweak
-    # would show "بالا" next to a "متوسط" score. The tampering fact is
-    # still in the text; only the verdict level follows the score.
+    # v9: the final verdict follows the risk SCORE and the DATA-SAFETY
+    # evidence — never the mod alone. A modded app with no
+    # exfiltration evidence is "ok" (TamperedCollage 19, Mercury 0).
+    # Confirmed exfiltration (added part with its own unknown server
+    # AND an upload endpoint) is always "risky", with the plain
+    # decisive sentence, whatever the score.
     _score = r.get("risk", {}).get("score", 0)
     q4_evidence = [f"اسکن ایستا کامل شد؛ امضا، مانیفست، دامنه‌ها و باینری بررسی "
                    f"شد و ریسک {_score} از 100 شد."]
-    if tamp.get("verdict") == "tampered":
+    if _unknown_servers:
         q4_evidence = [q4_evidence[0] +
-                       f" دستکاری شخص ثالث تأیید شد: {tamp.get('injected_dylib_count', 0)} "
-                       "dylib تزریقی."]
+                       f" بخش اضافه با سرور ناشناس "
+                       f"{', '.join(_unknown_servers)} حرف می‌زند."]
+    elif tamp.get("verdict") == "tampered":
+        q4_evidence = [q4_evidence[0] +
+                       f" نسخه آنلاک شده است؛ {tamp.get('injected_dylib_count', 0)} "
+                       "بخش اضافه دارد؛ مدرکی از ارسال داده نیست."]
     elif tamp.get("verdict") == "suspicious":
         q4_evidence = [q4_evidence[0] +
-                       " یک نشانه‌ی دستکاری پیدا شد (dylib تزریقی)؛ برای حکم "
-                       "قطعی نشانه‌ی دوم لازم است."]
+                       " یک بخش اضافه پیدا شد؛ مدرکی از ارسال داده نیست."]
     if encrypted:
         q4_evidence = [q4_evidence[0] +
                        " باینری رمزگذاری‌شده است (FairPlay)؛ تحلیل رشته‌ها انجام نشد."]
     q4_limits = []  # v7: no per-answer limit lines (see module header)
     if encrypted and not tamp.get("tampered"):
         q4_verdict, q4_short = "partial", "بررسی ناقص — باینری رمزگذاری‌شده است"
+    elif _dangerous:
+        q4_verdict, q4_short = ("risky",
+            "این نسخه اطلاعات شما را به سرور ناشناس می‌فرستد؛ نصب نکنید")
     elif _score >= 60:
         q4_verdict, q4_short = ("risky",
-            "دستکاری شخص ثالث تأیید شد؛ با احتیاط استفاده کنید"
-            if tamp.get("verdict") == "tampered" else
-            "دستکاری مشکوک است؛ با احتیاط استفاده کنید"
-            if tamp.get("verdict") == "suspicious" else
             "چند نشانه‌ی واقعی دارد؛ با احتیاط استفاده کنید")
     elif _score >= 30:
         q4_verdict, q4_short = ("caution",
-            "دستکاری شخص ثالث تأیید شد؛ با احتیاط استفاده کنید"
-            if tamp.get("verdict") == "tampered" else
-            "دستکاری مشکوک است؛ با احتیاط استفاده کنید"
-            if tamp.get("verdict") == "suspicious" else
             "چند نکته‌ی حریم خصوصی دارد، جای نگرانی جدی نیست")
     else:
         q4_verdict, q4_short = "ok", "نشانه‌ی جدی پیدا نشد"
 
+    # v8: photo questions exist ONLY when the app can READ photos.
+    # Otherwise there is ONE plain "does not apply" answer — the
+    # card and the report must not plant photo-theft fear for an app
+    # that never touches the user's photos (Mercury: add-only).
+    if photo_read:
+        photo_answers = [
+            {"id": "sends_photos_to_server",
+             "question_fa": "آیا برنامه عکس‌ها/فایل‌ها را به سرور یا فضای ابری می‌فرستد؟",
+             "verdict": q1_verdict, "answer_fa": q1_short,
+             "evidence": q1_evidence, "limits": q1_limits},
+            {"id": "third_party_can_see_photos",
+             "question_fa": "آیا سازنده‌ی نسخه‌ی آنلاک می‌تواند عکس‌ها/ویدیوهای کاربر را ببیند یا دریافت کند؟",
+             "verdict": q2_verdict, "answer_fa": q2_short,
+             "evidence": q2_evidence, "limits": q2_limits},
+            {"id": "collects_photo_info",
+             "question_fa": "آیا برنامه اطلاعات عکس/فایل کاربر را جمع‌آوری می‌کند؟",
+             "verdict": q3_verdict, "answer_fa": q3_short,
+             "evidence": q3_evidence, "limits": q3_limits},
+        ]
+    else:
+        if photo_add_only:
+            _na_short = ("نه — این برنامه عکس‌های شما را نمی‌خواند؛ فقط "
+                         "می‌تواند اسکرین‌شات ذخیره کند")
+            _na_evidence = ["فقط اجازه‌ی ذخیره در گالری اعلام شده است؛ "
+                            "برنامه عکس‌های شما را نمی‌خواند."]
+        else:
+            _na_short = "نه — این برنامه به عکس‌های شما دسترسی ندارد"
+            _na_evidence = ["هیچ دسترسی به گالری عکس در برنامه اعلام نشده "
+                            "است."]
+        photo_answers = [
+            {"id": "photos_not_applicable",
+             "question_fa": "آیا این برنامه به عکس‌های شما دسترسی دارد؟",
+             "verdict": "no-evidence", "answer_fa": _na_short,
+             "evidence": _na_evidence, "limits": []},
+        ]
+
     return [
+        # v9: the answer id stays "tampering" so saved JSON stays
+        # readable, but the QUESTION is the unlocked question now —
+        # the word for the mod is "آنلاک شده", never a scary label.
         {"id": "tampering",
-         "question_fa": "آیا این نسخه (توئیک) غیر از شرکت اصلی، توسط شخص ثالث دستکاری شده تا داده به خودش برسد؟",
+         "question_fa": "آیا این نسخه آنلاک شده است؟",
          "verdict": q5_verdict, "answer_fa": q5_short,
          "evidence": q5_evidence, "limits": q5_limits},
-        {"id": "sends_photos_to_server",
-         "question_fa": "آیا برنامه عکس‌ها/فایل‌ها را به سرور یا فضای ابری می‌فرستد؟",
-         "verdict": q1_verdict, "answer_fa": q1_short,
-         "evidence": q1_evidence, "limits": q1_limits},
-        {"id": "third_party_can_see_photos",
-         "question_fa": "آیا سازنده‌ی ماد یا شخص ثالث می‌تواند عکس‌ها/ویدیوهای کاربر را ببیند یا دریافت کند؟",
-         "verdict": q2_verdict, "answer_fa": q2_short,
-         "evidence": q2_evidence, "limits": q2_limits},
-        {"id": "collects_photo_info",
-         "question_fa": "آیا برنامه اطلاعات عکس/فایل کاربر را جمع‌آوری می‌کند؟",
-         "verdict": q3_verdict, "answer_fa": q3_short,
-         "evidence": q3_evidence, "limits": q3_limits},
+        *photo_answers,
         {"id": "verdict",
          "question_fa": "حکم نهایی — این نسخه بررسی شده است؟ چه چیزی تأیید شد و چه چیزی قابل بررسی نیست؟",
          "verdict": q4_verdict, "answer_fa": q4_short,
@@ -1152,12 +1604,22 @@ def extract_strings(data):
             pass
     return out
 
-def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES):
+def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES,
+                        purpose=None, main_binary=False):
     """Only call when NOT encrypted. Returns URLs/domains + suspicious hits.
 
     v4: only *network* URLs are counted. Namespace/docs/invalid URL
     strings are returned separately in "ignored_urls" with their reason
     and never add risk.
+    v8: in the MAIN binary, a pattern that is the app's own job
+    (location in a weather app, camera in a camera app — see
+    detect_app_purpose) scores 0 and is listed under "info_patterns"
+    with the note "موردنیاز برای کار اصلی برنامه", never as a
+    suspicious hit. dlopen/dlsym and motion-sensor symbols are
+    info-only in the main binary too (they only count inside an
+    injected dylib, via the single tampering line). Dylibs keep the
+    old behaviour (purpose=None, main_binary=False): their patterns
+    are scored, because a dylib is not the app doing its own job.
     """
     try:
         data = exe_path.read_bytes()[:max_bytes]
@@ -1181,12 +1643,26 @@ def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES):
             http_urls.add(u)
     strings = extract_strings(data)
     hits = []
+    info_hits = []
+    _purpose_pats = _purpose_patterns(purpose) if main_binary else set()
     for pat, fa, en, pts in SUSPICIOUS_PATTERNS:
         rx = _rx(pat)  # v7: token boundaries, not bare substrings
         count = sum(1 for s in strings if rx.search(s))
         if count:
-            hits.append({"pattern": pat, "label_fa": fa, "label_en": en,
-                         "points": pts, "matches": count})
+            if main_binary and pat in MAIN_BINARY_INFO_ONLY:
+                info_hits.append({"pattern": pat, "label_fa": fa,
+                                  "label_en": en, "points": 0,
+                                  "matches": count,
+                                  "note": "در باینری اصلی به‌تنهایی نشانه‌ی "
+                                          "خطر نیست؛ فقط اطلاعات است."})
+            elif pat in _purpose_pats:
+                info_hits.append({"pattern": pat, "label_fa": fa,
+                                  "label_en": en, "points": 0,
+                                  "matches": count,
+                                  "note": "موردنیاز برای کار اصلی برنامه"})
+            else:
+                hits.append({"pattern": pat, "label_fa": fa, "label_en": en,
+                             "points": pts, "matches": count})
     # Generic iOS APIs (v5): counted separately, 0 points, never suspicious.
     generic = []
     _on_device_speech = any("requiresOnDeviceRecognition" in s for s in strings)
@@ -1207,7 +1683,8 @@ def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES):
                             "points": 0, "matches": count, "note": n})
     return {"string_count": len(strings), "urls": sorted(urls),
             "domains": sorted(domains), "insecure_http_urls": sorted(http_urls),
-            "ignored_urls": ignored, "suspicious": hits, "generic_apis": generic}
+            "ignored_urls": ignored, "suspicious": hits,
+            "info_patterns": info_hits, "generic_apis": generic}
 
 def scan_bundle_files(app_dir):
     """URLs/domains from all small files inside .app (plists, json, configs).
@@ -1690,9 +2167,17 @@ TWEAK_NAME_HINTS = ("patch", "blatant", "sideload", "keychainfix",
 
 
 def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
-    """Decide whether this IPA was tampered with by a third party besides
-    the original company, and whether the injected code talks to its own
-    server. Returns the tampering dict stored in result["tampering"].
+    """Decide whether this IPA is an unlocked version with added parts
+    besides the original company, and whether the added code talks to
+    its own server. Returns the tampering dict stored in
+    result["tampering"].
+
+    (v9: the dict key stays "tampering" so saved JSON stays readable,
+    but every Persian string it carries is neutral — the unlocked
+    version is normal in this store, so nothing here is a warning.
+    Only the EXFILTRATION evidence — an unknown server of an added
+    part, with or without an upload endpoint — can ever be a risk,
+    and that is scored separately in scan_ipa, never here.)
 
     Signals (independent types — v7, research: a tamper verdict needs
     ≥2 independent signals, never one alone):
@@ -1730,7 +2215,7 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
             reasons.append("install name در MobileSubstrate است: " + ms_names[0])
         name_low = (d.get("name") or "").lower()
         if any(h in name_low for h in ("patch", "blatant", "sideload", "keychainfix")):
-            reasons.append("نام فایل نشانه‌ی پچ/توئیک است: " + d.get("name", ""))
+            reasons.append("نام فایل نشانه‌ی بخش اضافه است: " + d.get("name", ""))
         if d.get("path", "").startswith("Frameworks/") and ms_names:
             reasons.append("در Frameworks برنامه قرار دارد ولی لودر آن MobileSubstrate است")
         if reasons:
@@ -1758,7 +2243,7 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
             evidence.append(f"  • `{d['name']}`: {d['unavailable']}")
     for p in tweak_debs:
         evidence.append(
-            f"بسته‌ی .deb توئیک: `{p.get('package') or p['name']}`"
+            f"بسته‌ی .deb بخش اضافه: `{p.get('package') or p['name']}`"
             f" نسخه‌ی {p.get('version') or '—'} — فایل‌های آن زیر Library/MobileSubstrate است")
     for f in (substrate_files or [])[:5]:
         evidence.append(f"فایل MobileSubstrate در باندل: `{f}`")
@@ -1779,24 +2264,24 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
     # ---- Independent corroborating signals (v7) ----
     signals = []
     if injected:
-        signals.append(f"dylib تزریقی با install name در MobileSubstrate "
+        signals.append(f"dylib اضافه با install name در MobileSubstrate "
                        f"({len(injected)} مورد)")
     if any(any(h in (d.get("name") or "").lower()
                for h in ("patch", "blatant", "sideload", "keychainfix"))
            for d in injected):
-        signals.append("نام فایل نشانه‌ی پچ/توئیک است")
+        signals.append("نام فایل نشانه‌ی بخش اضافه است")
     if tweak_debs:
-        signals.append("بسته‌ی .deb توئیک در باندل است")
+        signals.append("بسته‌ی .deb بخش اضافه در باندل است")
     if substrate_files:
         signals.append("فایل MobileSubstrate در باندل است")
     if unknown_tweak_servers:
-        signals.append("توئیک با سرور ناشناخته حرف می‌زند: "
+        signals.append("بخش اضافه با سرور ناشناخته حرف می‌زند: "
                        + "، ".join(unknown_tweak_servers))
     _hook_labels = {"دسترسی به کی‌چین", "بازرسی لودر داینامیک (dyld)",
                     "جستجوی کلاس‌ها در ران‌تایم"}
     if any(h.get("label_fa") in _hook_labels
            for d in injected for h in (d.get("suspicious") or [])):
-        signals.append("الگوهای هوک/کی‌چین در dylib تزریقی")
+        signals.append("الگوهای هوک/کی‌چین در dylib اضافه")
     _prov_team = (result.get("provisioning") or {}).get("team")
     _ent_team = (result.get("entitlements") or {}).get(
         "com.apple.developer.team-identifier")
@@ -1808,15 +2293,19 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
 
     tampered = bool(injected or tweak_debs or substrate_files)
     signal_count = len(signals)
+    # v9: the verdict is a NEUTRAL fact, not a warning — in this store
+    # an unlocked version is normal. "tampered" (the internal verdict
+    # value) only means "added parts were found".
     if signal_count >= 2:
-        verdict_fa = "تأیید شد — دستکاری شخص ثالث"
+        verdict_fa = (f"نسخه آنلاک شده — {len(injected)} بخش اضافه دارد"
+                      if injected else "نسخه آنلاک شده — بخش اضافه دارد")
         verdict_en = "tampered"
     elif signal_count == 1:
-        verdict_fa = ("مشکوک — یک نشانه‌ی دستکاری پیدا شد؛ برای حکم قطعی "
-                      "نشانه‌ی دوم لازم است")
+        verdict_fa = ("به نظر می‌رسد آنلاک شده باشد — یک نشانه پیدا شد؛ "
+                      "برای حکم قطعی نشانه‌ی دوم لازم است")
         verdict_en = "suspicious"
     else:
-        verdict_fa = "شواهدی از دستکاری شخص ثالث پیدا نشد"
+        verdict_fa = "نسخه‌ی اصلی — بخش اضافه‌ای پیدا نشد"
         verdict_en = "not-found"
     if tampered:
         if unknown_tweak_servers:
@@ -1831,7 +2320,7 @@ def detect_tampering(result, dylib_analysis, deb_packages, substrate_files):
                            "پیدا نشد — یعنی شواهدی از ارسال مستقیم داده به "
                            "سرور شخص ثالث نیست.")
     else:
-        server_note = ("هیچ dylib تزریقی (MobileSubstrate)، بسته‌ی .deb توئیک "
+        server_note = ("هیچ dylib اضافه (MobileSubstrate)، بسته‌ی .deb بخش اضافه "
                        "یا فایل Substrate در باندل پیدا نشد.")
     # v7: one neutral sentence only — the runtime-traffic scare is
     # gone. This list is JSON-only; the same sentence appears once
@@ -1871,7 +2360,7 @@ def scan_ipa(ipa_path, workdir):
         "file": str(ipa_path),
         **hashes_of(ipa_path),
         "size_bytes": ipa_path.stat().st_size,
-        "scanner": "sibstar-ipa-scanner 7.0 (stdlib only)",
+        "scanner": "sibstar-ipa-scanner 9.0 (stdlib only)",
         "limits": [
             "IPAهای اپ‌استور با FairPlay رمزگذاری شده‌اند؛ تحلیل رشته‌ها و الگوهای باینری بدون نسخه‌ی رمزگشایی‌شده ممکن نیست.",
             "این اسکن بدون رمزگشایی، Info.plist، مانیفست حریم خصوصی، فریم‌ورک‌ها، entitlements، ATS و URLها را می‌خواند.",
@@ -2039,7 +2528,13 @@ def scan_ipa(ipa_path, workdir):
                 "باینری رمزگذاری‌شده (FairPlay) است — تحلیل رشته‌ها و الگوهای API باینری بدون نسخه‌ی رمزگشایی‌شده ممکن نیست")
             bin_strings = {"unavailable": True, "reason": "FairPlay-encrypted (cryptid=1)"}
         elif binary.get("encrypted") is False:
-            bin_strings = scan_binary_strings(exe_path)
+            # v8: detect the app's purpose BEFORE scanning the binary
+            # strings, so a pattern that is the app's own job scores 0.
+            _purpose = detect_app_purpose(
+                info, ent, frameworks, binary.get("linked_dylibs") or [])
+            result["app_purpose"] = _purpose
+            bin_strings = scan_binary_strings(
+                exe_path, purpose=_purpose, main_binary=True)
         else:
             bin_strings = {"unavailable": True, "reason": "وضعیت رمزگذاری باینری مشخص نشد"}
     else:
@@ -2047,6 +2542,27 @@ def scan_ipa(ipa_path, workdir):
         bin_strings = {"unavailable": True, "reason": "executable not found"}
     result["binary"] = binary
     result["binary_strings"] = bin_strings
+    # v8: purpose is still known when the binary is encrypted or
+    # missing (plist/entitlements/frameworks are enough to detect it).
+    if "app_purpose" not in result:
+        result["app_purpose"] = detect_app_purpose(
+            info, ent, frameworks, binary.get("linked_dylibs") or [])
+    # v8 — photo READ vs ADD: add-only (NSPhotoLibraryAddUsageDescription)
+    # lets the app SAVE a screenshot to the library; it cannot READ the
+    # user's photos. Read access = the read permission, or direct
+    # PHPhotoLibrary use in the main binary. (A tweak dylib's PhotoKit
+    # use does not count: the question is what the APP can read.)
+    _perm_keys = {p["key"] for p in perms}
+    _photo_read_perm = "NSPhotoLibraryUsageDescription" in _perm_keys
+    _photo_add_perm = "NSPhotoLibraryAddUsageDescription" in _perm_keys
+    _photo_direct = False
+    if bin_strings and not bin_strings.get("unavailable"):
+        _photo_direct = any(
+            g.get("pattern") in (r"PHPhotoLibrary|PHAsset",)
+            for g in bin_strings.get("generic_apis", []))
+    result["photo_read_access"] = bool(_photo_read_perm or _photo_direct)
+    result["photo_access"] = ("read" if result["photo_read_access"]
+                              else "add-only" if _photo_add_perm else "none")
 
     # MobSF-style binary checks (only on a decrypted binary).
     _main_strings = []
@@ -2074,8 +2590,15 @@ def scan_ipa(ipa_path, workdir):
     result["weak_crypto"] = scan_weak_crypto(_main_strings)
     # Secrets can also hide in plist values: keys that look like
     # api-key / secret / password / token with a long random-looking value.
+    # v8 (Crsel): a PUBLIC client token is not a secret — FacebookClientToken
+    # (and any *ClientToken / FacebookAppID key) is meant to be embedded
+    # by the Facebook SDK's own design, so it is skipped, never scored.
+    _PUBLIC_CLIENT_TOKEN_KEY = re.compile(
+        r"(?i)(client[_-]?token|facebook(app|application)?id)$")
     for _fname, _plist in (("Info.plist", info),):
         for _k, _v in _plist.items():
+            if _PUBLIC_CLIENT_TOKEN_KEY.search(_k):
+                continue
             if isinstance(_v, str) and len(_v) >= 20 and re.search(
                     r"(?i)(api[_-]?key|secret|password|token)", _k):
                 if not _v.startswith(("http://", "https://")):
@@ -2155,6 +2678,10 @@ def scan_ipa(ipa_path, workdir):
     result["urls"] = urls[:200]
     result["url_count"] = len(urls)
     result["domains"] = domains
+    # v8: domains grouped by kind for the report — a bare "26 domains"
+    # number scares a non-technical reader; the grouping says what
+    # they actually are (weather services, Apple, tracker, CDN, other).
+    result["domain_groups"] = group_domains(domains)
     result["insecure_http_urls"] = http_urls
     # De-duplicate the ignored list (same namespace URL can appear in
     # many files) and keep only the reason + a short sample.
@@ -2185,7 +2712,7 @@ def scan_ipa(ipa_path, workdir):
     for _art in result.get("jailbreak_artifacts", []):
         result["tampering"]["evidence"].append(
             f"رشته‌ی مسیر جیلبریک در کد ({_art['source']}): {_art['marker']} "
-            "(مبهم — ممکن است کد تشخیص جیلبریک خود برنامه باشد، نه مدرک دستکاری)")
+            "(مبهم — ممکن است کد تشخیص جیلبریک خود برنامه باشد، نه مدرک ارسال داده)")
 
     # ---- Risk score v6: calm and accurate, never inflated ----
     # v6 recalibration (a clean legit app must score LOW):
@@ -2252,9 +2779,21 @@ def scan_ipa(ipa_path, workdir):
     # threat on its own. When the usage description says the access is
     # for ads, it scores 1 point at most and the reason says so in plain
     # words — it is never presented as a medium/high threat.
+    # v8: permissions that are the app's own job score 0 — location
+    # in a weather/maps app, camera in a camera app. They are listed
+    # in result["risk"]["purpose_exempt"] so the report can say why
+    # they added no points, instead of silently hiding them.
+    _purpose_perm_keys = _purpose_permissions(result.get("app_purpose"))
+    _purpose_label = (result.get("app_purpose") or {}).get("label_fa") or ""
+    purpose_exempt = []
     for p in perms:
         if p["key"] in LOCATION_KEYS and p["key"] != keep_loc:
             continue  # same access, already counted under the strongest key
+        if p["key"] in _purpose_perm_keys:
+            purpose_exempt.append(
+                f"دسترسی {p['label_fa']} ({p['label_en']}) — موردنیاز برای "
+                f"کار اصلی برنامه ({_purpose_label})؛ امتیازی ندارد")
+            continue
         desc = str(p.get("description") or "").lower()
         is_ads = ("ads" in desc) or ("advertis" in desc) or ("تبلیغ" in desc)
         pts = 2 if p["risk"] >= 9 else (1 if p["risk"] >= 5 else 0)
@@ -2304,9 +2843,31 @@ def scan_ipa(ipa_path, workdir):
             add(4, "مانیفست داده‌ی حساس جمع می‌کند (متصل به هویت یا با ردیابی): " +
                 "، ".join(c.get("sensitive") or c.get("type", "?") for c in sensitive_types[:4]),
                 category="privacy")
+    # v8 (Crsel): each tracker is counted ONCE. A tracker domain adds
+    # points only when its tracker family was not already counted via
+    # the detected SDK above — api.eu.amplitude.com +
+    # api2.amplitude.com + the Amplitude SDK is one tracker fact, not
+    # three. A domain whose family has no detected SDK still adds 2
+    # once (the domain itself is the evidence).
+    _sdk_families = set()
+    for _t in dedup:
+        # Every word of the tracker label counts as its family:
+        # "Firebase (Google Analytics/Crashlytics)" covers the
+        # crashlytics family too, and "App Center" covers "appcenter"
+        # via the space-stripped form.
+        _label = (_t.get("tracker") or "").lower()
+        for _w in re.split(r"[^a-z0-9]+", _label):
+            if _w:
+                _sdk_families.add(_w)
+        _stripped = re.sub(r"[^a-z0-9]", "", _label.split("(")[0])
+        if _stripped:
+            _sdk_families.add(_stripped)
+    _seen_tracker_families = set(_sdk_families)
     for domain_entry in result.get("domain_analysis", []):
-        if domain_entry.get("is_tracker_domain"):
-            add(2, f"دامنه ترکر/تبلیغات: {domain_entry['domain']}",
+        _fam = _tracker_family(domain_entry.get("domain", ""))
+        if _fam and _fam not in _seen_tracker_families:
+            _seen_tracker_families.add(_fam)
+            add(2, f"دامنه ترکر/تبلیغات ({_fam}) بدون SDK متناظر: {domain_entry['domain']}",
                 category="privacy")
     insecure_exc = [d for d, cfg in result["ats"].get("exception_domain_details", {}).items()
                     if cfg.get("allows_insecure_http")]
@@ -2343,38 +2904,47 @@ def scan_ipa(ipa_path, workdir):
         if not prot.get("pie"):
             add(3, "باینری PIE نیست (Position Independent Executable فعال نیست)",
                 category="code", masvs="MASVS-CODE", confidence="medium")
-    # v5: NO double counting. An injected dylib's patterns are counted
-    # ONCE, inside the single tampering line below (base 8 + the dylibs'
-    # pattern points, capped at the 25-point tweak cap). They are NOT
-    # added again as individual findings. Non-injected dylibs are still
-    # scored individually (source "original").
+    # v9: NO points for the mod itself. An added dylib's patterns are
+    # NOT scored as a "tampering" line any more — the unlocked version
+    # is the product, not a risk. Only EXFILTRATION by the added parts
+    # scores, in the "tweak" category (cap 25, same as before):
+    #   unknown server of an added part ............ 15
+    #   upload endpoint + that server (sending path complete) .. 7
+    #   keychain access inside an added part WITH a server ..... 3
+    # A .deb tweak package on its own is just how the unlocked version
+    # is delivered in this store — 0 points without a server/upload
+    # channel. Keychain/dyld/runtime patterns inside an added part
+    # with NO server are info only (0 points). Non-injected dylibs
+    # are still scored individually (source "original").
     tamp = result.get("tampering") or {}
     injected_names = {d["name"] for d in tamp.get("injected_dylibs", [])}
-    if tamp.get("tampered"):
-        injected_pts = sum(
-            h.get("points", 0)
-            for d in dylib_analysis if d.get("name") in injected_names
-            for h in d.get("suspicious", []))
-        _tamp_reason = (f"دستکاری شخص ثالث: {tamp.get('injected_dylib_count', 0)} dylib تزریقی "
-                        "(MobileSubstrate) در باندل است")
-        if tamp.get("verdict") == "suspicious":
-            _tamp_reason = (f"دستکاری مشکوک: {tamp.get('injected_dylib_count', 0)} dylib با نشانه‌ی "
-                            "MobileSubstrate — برای حکم قطعی نشانه‌ی دوم لازم است")
-        add(min(25, 8 + injected_pts), _tamp_reason,
-            source="tweak", category="tweak", confidence="high")
+    _exfil = _exfiltration_evidence(result)
+    tamp["exfiltration"] = _exfil
+    if _exfil["has_unknown_server"]:
+        add(15, f"بخش اضافه با سرور ناشناس حرف می‌زند: "
+                f"{', '.join(_exfil['unknown_servers'])}",
+            source="tweak", category="tweak", confidence="high",
+            tier="proven")
+    if _exfil["confirmed"]:
+        add(7, f"نقطه‌ی آپلود عکس/فایل هست "
+                f"({', '.join(_exfil['upload_domains'])}) و بخش اضافه "
+                f"سرور ناشناس دارد — مسیر ارسال کامل است",
+            source="tweak", category="tweak", confidence="high",
+            tier="proven")
+    if _exfil["has_unknown_server"] and _exfil["keychain_in_tweak"]:
+        add(3, "بخش اضافه به کی‌چین دسترسی دارد و سرور ناشناس هم دارد",
+            source="tweak", category="tweak", confidence="medium",
+            tier="capability")
     for d in dylib_analysis:
         if d.get("name") in injected_names:
-            continue  # counted once inside the tampering line above
+            continue  # v9: added-part patterns score only via the
+            # exfiltration lines above, never on their own
         for hit in d.get("suspicious", []):
             add(hit["points"], f"الگوی مشکوک در dylib {d['name']}: {hit['label_fa']} ({hit['matches']} مورد)",
                 source="original", category="code")
         if d.get("tracker"):
             add(5, f"dylib ترکر: {d['name']} → {d['tracker']}",
                 source="original", category="code")
-    for p in deb_packages:
-        if p.get("is_tweak"):
-            add(8, f"بسته‌ی .deb توئیک: {p.get('package') or p['name']}",
-                source="tweak", category="tweak")
     if not code_sig:
         add(3, "امضای کد پیدا نشد", category="code")
     if binary.get("encrypted") is True:
@@ -2384,17 +2954,26 @@ def scan_ipa(ipa_path, workdir):
         breakdown.append({"points": 0, "source": "original", "category": "code",
                           "reason": "باینری رمزگذاری نشده — تحلیل رشته‌ها انجام شد"})
     score = min(100, score)
+    # v9: the level follows the SCORE — no floor for the mod alone
+    # any more (Mercury: 0/100 is "کم", TamperedCollage: 19/100 is
+    # "کم"). The only floor left is for CONFIRMED exfiltration
+    # (added part with its own unknown server AND an upload endpoint):
+    # proven sending is never "low risk", even on a clean original.
     level = "کم" if score < 30 else ("متوسط" if score < 60 else "بالا")
+    if _exfil["confirmed"] and level == "کم":
+        level = "متوسط"
     original_points = sum(b.get("points", 0) for b in breakdown if b.get("source") != "tweak")
     tweak_points = sum(b.get("points", 0) for b in breakdown if b.get("source") == "tweak")
     result["risk"] = {"score": score, "level_fa": level,
-                      "level_en": "low" if score < 30 else ("medium" if score < 60 else "high"),
+                      "level_en": {"کم": "low", "متوسط": "medium",
+                                   "بالا": "high"}[level],
                       "breakdown": breakdown,
                       "category_points": dict(cat_used),
                       "category_caps": dict(CATEGORY_CAPS),
                       "original_points": original_points,
                       "tweak_points": tweak_points,
                       "capped_notes": {k: v for k, v in capped_by_cat.items() if v},
+                      "purpose_exempt": purpose_exempt,
                       "reasons": [b["reason"] for b in breakdown]}
 
     # ---- Per-finding severity list (v3) ----
@@ -2447,7 +3026,7 @@ def scan_ipa(ipa_path, workdir):
         "dynamic_only": [
             "MASVS-NETWORK — رفتار واقعی TLS و certificate pinning فقط با تست زمان اجرا",
             "MASVS-AUTH — بررسی‌های سمت سرور (توکن، نشست) فقط با تست زمان اجرا",
-            "MASVS-RESILIENCE — ضد دستکاری و ضد دیباگ در زمان اجرا فقط با تست زمان اجرا",
+            "MASVS-RESILIENCE — ضد تغییر در زمان اجرا فقط با تست زمان اجرا",
         ],
         "note": ("تحلیل ایستا خودکار راهنماست، نه حکم قطعی (OWASP MASTG): "
                  "خروجی می‌تواند مثبت کاذب و منفی کاذب داشته باشد. هر یافته "
@@ -2483,29 +3062,43 @@ def render_report(r):
     if r.get("risk"):
         L.append(f"**ریسک کلی: {r['risk']['score']}/100 — {r['risk']['level_fa']}** "
                  f"(برنامه‌ی اصلی: {r['risk'].get('original_points', '?')}، "
-                 f"توئیک/تزریقی: {r['risk'].get('tweak_points', '?')})")
+                 f"خطر ارسال داده از بخش اضافه: {r['risk'].get('tweak_points', '?')})")
     L.append("")
-    L.append("## دستکاری شخص ثالث / توئیک")
-    L.append(f"**حکم: {tamp.get('verdict_fa', '—')}**")
-    if tamp.get("signals"):
-        L.append(f"- نشانه‌های مستقل دستکاری ({tamp.get('signal_count', len(tamp['signals']))} مورد): "
-                 + "؛ ".join(tamp["signals"]))
-    if tamp.get("unknown_tweak_servers"):
-        L.append(f"- ⚠️ سرورهای ناشناخته‌ی توئیک: {', '.join(tamp['unknown_tweak_servers'])}")
+    # v9: this section states the FACT (unlocked version, how many
+    # added parts) and the DATA-SAFETY conclusion — never a warning
+    # about the mod itself. The conclusion is one of:
+    # "شواهدی از ارسال داده نیست" / "سرور ناشناس هست ولی مدرکی از
+    # ارسال نیست" / "ارسال داده تأیید شد".
+    L.append("## نسخه آنلاک شده — بخش‌های اضافه")
+    L.append(f"**وضعیت: {tamp.get('verdict_fa', '—')}**")
+    _exfil = (tamp.get("exfiltration") or _exfiltration_evidence(r))
+    if _exfil.get("confirmed"):
+        L.append(f"**ارسال داده تأیید شد — بخش اضافه با سرور ناشناس "
+                 f"{', '.join(_exfil.get('unknown_servers', []))} حرف می‌زند و "
+                 f"نقطه‌ی آپلود ({', '.join(_exfil.get('upload_domains', []))}) هم هست.**")
+    elif _exfil.get("has_unknown_server"):
+        L.append(f"- ⚠️ سرور ناشناخته‌ی بخش اضافه: "
+                 f"{', '.join(_exfil.get('unknown_servers', []))} — مدرکی از "
+                 f"ارسال عکس/فایل به آن نیست.")
     else:
+        L.append("- شواهدی از ارسال داده نیست.")
+    if tamp.get("signals"):
+        L.append(f"- نشانه‌های بخش اضافه ({tamp.get('signal_count', len(tamp['signals']))} مورد): "
+                 + "؛ ".join(tamp["signals"]))
+    if not tamp.get("unknown_tweak_servers"):
         L.append(f"- {tamp.get('server_note_fa', '')}")
     if tamp.get("tweak_deb_packages"):
-        L.append(f"- بسته‌های .deb توئیک: {', '.join(tamp['tweak_deb_packages'])}")
+        L.append(f"- بسته‌های .deb بخش اضافه: {', '.join(tamp['tweak_deb_packages'])}")
     _jb_markers = sorted({a["marker"] for a in (r.get("jailbreak_artifacts") or [])})
     if _jb_markers:
-        L.append(f"- رشته‌های مسیر جیلبریک در کد (مبهم — ممکن است کد تشخیص جیلبریک خود برنامه باشد، نه مدرک دستکاری): {', '.join(_jb_markers)}")
+        L.append(f"- رشته‌های مسیر جیلبریک در کد (مبهم — ممکن است کد تشخیص جیلبریک خود برنامه باشد، نه مدرک ارسال داده): {', '.join(_jb_markers)}")
     if tamp.get("injected_dylibs"):
         L.append("")
-        L.append("### dylibهای تزریقی — هر کدام جدا")
+        L.append("### بخش‌های اضافه (dylib) — هر کدام جدا")
         for d in tamp["injected_dylibs"]:
             L.append(f"#### `{d['path']}` — {d.get('size_bytes', 0):,} بایت")
             for reason in d.get("reasons_fa", []):
-                L.append(f"- چرا تزریقی است: {reason}")
+                L.append(f"- چرا اضافه است: {reason}")
             if d.get("domains"):
                 L.append(f"- دامنه‌های این dylib: {', '.join(d['domains'])}")
             else:
@@ -2516,8 +3109,9 @@ def render_report(r):
                 L.append(f"- ⚠️ در دسترس نیست: {d['unavailable']}")
             L.append("- جزئیات کامل الگوهای این dylib در بخش «کتابخانه‌های داینامیک» است.")
         L.append("")
-        L.append("امتیاز الگوهای این dylibها توصیفی است و فقط یک بار، در خط «دستکاری شخص ثالث» "
-                 "در ریسک کلی، حساب شده است؛ جدا جمع نمی‌شود.")
+        L.append("الگوهای این dylibها به‌تنهایی امتیازی ندارند؛ فقط وقتی امتیاز "
+                 "می‌گیرند که بخش اضافه سرور ناشناس داشته باشد (خطر ارسال داده)؛ "
+                 "جزئیات امتیاز در بخش «چرا این امتیاز؟» است.")
     L.append("- محدودیت‌ها: پایین گزارش، بخش «محدودیت‌های اسکن».")
     L.append("")
     if r.get("privacy_answers"):
@@ -2544,15 +3138,20 @@ def render_report(r):
     if r.get("risk"):
         L.append("## چرا این امتیاز؟ — تفکیک ریسک")
         for b in r["risk"]["breakdown"]:
-            tag = " [توئیک]" if b.get("source") == "tweak" else ""
+            tag = " [بخش اضافه]" if b.get("source") == "tweak" else ""
             L.append(f"- (+{b['points']}) {b['reason']}{tag}")
         _cat_fa = {"network": "شبکه", "permissions": "دسترسی‌ها",
-                   "privacy": "حریم خصوصی", "code": "کد", "tweak": "توئیک"}
+                   "privacy": "حریم خصوصی", "code": "کد", "tweak": "بخش اضافه"}
         for _cat in ("network", "permissions", "privacy", "code", "tweak"):
             _notes = (r["risk"].get("capped_notes") or {}).get(_cat) or []
             if _notes:
                 L.append(f"- (سقف دسته‌ی {_cat_fa[_cat]} پر شد — امتیازی اضافه نشد): "
                          + "؛ ".join(_notes))
+        # v8: purpose-matched access/APIs added no points — say so, so
+        # the reader does not wonder why location scored 0 in a
+        # weather app.
+        for _ex in (r["risk"].get("purpose_exempt") or []):
+            L.append(f"- امتیازی نگرفت: {_ex}")
         L.append("- جمع امتیازهای بالا دقیقاً برابر ریسک کلی است (بدون دوباره‌شماری).")
         L.append("- امتیاز حکم امنیتی نیست؛ فقط نشان می‌دهد چند قانون رد شده است و چرا — یک برنامه می‌تواند امتیاز بالا بگیرد و خطر واقعی‌اش کم باشد، یا برعکس.")
         L.append("")
@@ -2586,7 +3185,7 @@ def render_report(r):
             L.append(f"- توضیح: {p['description']}")
         if p.get("depends"):
             L.append(f"- وابستگی‌ها: {p['depends']}")
-        L.append(f"- توئیک (MobileSubstrate): {'بله' if p.get('is_tweak') else 'خیر'}")
+        L.append(f"- بسته‌ی بخش اضافه (MobileSubstrate): {'بله' if p.get('is_tweak') else 'خیر'}")
         if p.get("dylib_files"):
             L.append(f"- فایل‌های dylib داخل بسته: {', '.join(p['dylib_files'][:10])}")
         if p.get("files"):
@@ -2611,7 +3210,7 @@ def render_report(r):
     if cov.get("note"):
         L.append(f"- ⚠️ {cov['note']}")
     L.append("- امتیاز ریسک سقف دارد: هر دسته (شبکه ۲۰، دسترسی ۱۵، حریم خصوصی ۱۵، "
-             "کد ۱۵، توئیک ۲۵) جداگانه محدود می‌شود تا یک دسته‌ی پر سر و صدا "
+             "کد ۱۵، بخش اضافه ۲۵) جداگانه محدود می‌شود تا یک دسته‌ی پر سر و صدا "
              "به‌تنهایی امتیاز را به ۱۰۰ نرساند. حداکثر امتیاز ممکن ۹۰ است.")
     L.append("")
     L.append(f"## خانواده‌ی ران‌تایم: {r.get('runtime_family') or '—'}")
@@ -2671,6 +3270,12 @@ def render_report(r):
         L.append(f"- **{p['label_fa']}** ({p['label_en']}) — ریسک {p['risk']}/10 — `{p['key']}`: {p['description']}")
     if not r.get("permissions"):
         L.append("- هیچ دسترسی حساسی در Info.plist اعلام نشده است.")
+    # v8: add-only is NOT read access — say so explicitly, or the
+    # reader assumes the app reads their photos (the Mercury bug).
+    if r.get("photo_access") == "add-only":
+        L.append("- توجه: دسترسی گالری فقط «ذخیره» است (add-only) — برنامه می‌تواند اسکرین‌شات ذخیره کند، ولی عکس‌های شما را نمی‌خواند.")
+    if (r.get("app_purpose") or {}).get("label_fa"):
+        L.append(f"- کار اصلی برنامه: {r['app_purpose']['label_fa']} — دسترسی‌ها و APIهایی که کار اصلی برنامه‌اند، امتیازی ندارند.")
     pm = r.get("privacy_manifest")
     L.append("")
     L.append("## مانیفست حریم خصوصی (PrivacyInfo.xcprivacy)")
@@ -2744,6 +3349,13 @@ def render_report(r):
             for g in bs["generic_apis"]:
                 _note = f" — {g['note']}" if g.get("note") else ""
                 L.append(f"  - {g['label_fa']} ({g['label_en']}) — {g['matches']} مورد{_note}")
+        # v8: purpose-matched / info-only patterns in the main binary —
+        # the app doing its own job, or a generic system API. 0 points.
+        if bs.get("info_patterns"):
+            L.append("- الگوهای اطلاعاتی در باینری اصلی (امتیازی ندارند — کار اصلی برنامه یا API معمولی سیستم):")
+            for h in bs["info_patterns"]:
+                _note = f" — {h['note']}" if h.get("note") else ""
+                L.append(f"  - {h['label_fa']} ({h['label_en']}) — {h['matches']} مورد{_note}")
     L.append("")
     L.append(f"## کتابخانه‌های داینامیک (.dylib) — {r.get('dylib_count', 0)} مورد")
     if not r.get("dylib_analysis"):
@@ -2767,8 +3379,10 @@ def render_report(r):
             L.append(f"- رشته‌های قابل خواندن: {d.get('string_count', 0)} — ریسک: {d.get('risk_points', 0)} ({d.get('severity')})")
             for h in d.get("suspicious", []):
                 if _is_injected:
-                    # v5: counted once inside the tampering line — no (+points) here.
-                    L.append(f"  - ⚠️ {h['label_fa']} ({h['label_en']}) — {h['matches']} مورد (در حکم دستکاری حساب شده است)")
+                    # v9: added-part patterns score only via the
+                    # exfiltration lines (unknown server / upload
+                    # endpoint) — on their own they add no points.
+                    L.append(f"  - ⚠️ {h['label_fa']} ({h['label_en']}) — {h['matches']} مورد (به‌تنهایی امتیازی ندارد)")
                 else:
                     L.append(f"  - ⚠️ {h['label_fa']} ({h['label_en']}) — {h['matches']} مورد — (+{h['points']})")
             if not d.get("suspicious"):
@@ -2785,6 +3399,10 @@ def render_report(r):
     L.append("")
     L.append(f"## URL Schemes: {', '.join(r.get('url_schemes', [])) or '—'}")
     L.append(f"## دامنه‌ها ({len(r.get('domains',[]))}) و URLها ({r.get('url_count',0)})")
+    _groups = r.get("domain_groups") or {}
+    if _groups:
+        L.append("- دامنه‌ها بر اساس نوع (گروه‌بندی تقریبی بر اساس نام دامنه): "
+                 + "، ".join(f"{k} {v}" for k, v in _groups.items()))
     for d in r.get("domain_analysis", [])[:50]:
         flags = []
         if d.get("is_tracker_domain"):
@@ -2805,11 +3423,22 @@ def render_report(r):
         for u in r["insecure_http_urls"][:20]:
             L.append(f"- {u}")
     if r.get("ignored_urls"):
+        # v8: the ignored reason is shown in plain Persian — the raw
+        # kind ("crl", "license", "shortener") means nothing to a reader.
+        _IGNORED_REASON_FA = {
+            "namespace": "فضای نام XML/XMP/SVG",
+            "docs": "مستندات/صفحه‌ی راهنما",
+            "invalid": "آدرس نامعتبر/ناقص",
+            "crl": "بررسی اعتبار گواهی (CRL/OCSP — با http طراحی شده)",
+            "license": "متن مجوز یا فونت",
+            "shortener": "لینک کوتاه‌شده در متن ارجاع",
+        }
         L.append("")
         L.append(f"### رشته‌های URL نادیده‌گرفته‌شده ({r.get('ignored_url_count', 0)} مورد — در ریسک حساب نمی‌شوند)")
-        L.append("این‌ها فضای نام XML/XMP/SVG یا رشته‌های مستندات‌اند، نه آدرس شبکه‌ای که برنامه صدا بزند:")
+        L.append("این‌ها فضای نام XML/XMP/SVG، رشته‌های مستندات، بررسی اعتبار گواهی یا متن مجوز فونت‌اند — نه آدرس شبکه‌ای که برنامه صدا بزند:")
         for item in r["ignored_urls"][:15]:
-            L.append(f"- `{item['url'][:120]}` — دلیل: {item['reason']}")
+            _rsn = _IGNORED_REASON_FA.get(item['reason'], item['reason'])
+            L.append(f"- `{item['url'][:120]}` — دلیل: {_rsn}")
         if r.get("ignored_domains"):
             L.append(f"- دامنه‌های نادیده‌گرفته‌شده: {', '.join(r['ignored_domains'][:20])}")
     L.append("")
@@ -2866,11 +3495,68 @@ def render_report(r):
             L.append(f"- {e}")
     return "\n".join(L) + "\n"
 
+
+def render_customer_report(r):
+    """Customer-safe report (v9) — the log Erfan forwards to the
+    customer. Plain language only: app name, one-line verdict, the
+    questions with decisive plain answers, and a few plain sentences.
+
+    Deliberately NOT in here: severity labels, technical finding
+    names (keychain / dyld / sysctl / dlopen / pasteboard …),
+    domain/URL lists, per-pattern risk breakdowns with (+N) numbers,
+    bundle IDs, hashes, entitlements, Mach-O details, raw server
+    addresses, or the words for the mod as a warning. A non-technical
+    customer reading the whole log must come away calm, not scared.
+    The full technical detail lives in render_report (the deep log
+    for Erfan) and in the JSON — never in this file. Answers are
+    shown WITHOUT their evidence lines: the evidence can name raw
+    domains and dylib internals, which is exactly what must not
+    reach a customer.
+    """
+    L = []
+    ident = r.get("identity", {}) or {}
+    answers = {a["id"]: a for a in (r.get("privacy_answers", []) or [])}
+    verdict_a = answers.get("verdict", {}) or {}
+    name = ident.get("display_name") or "برنامه"
+    version = ident.get("version") or "—"
+
+    L.append(f"# گزارش بررسی برنامه — {name}")
+    L.append("")
+    L.append(f"نسخه {version}")
+    L.append("")
+    L.append(f"**{verdict_a.get('answer_fa', '—')}**")
+    L.append("")
+    if r.get("risk"):
+        L.append(f"امتیاز بررسی: {r['risk']['score']} از 100 — "
+                 f"هرچه عدد کمتر باشد، بهتر است.")
+        L.append("")
+    L.append("## سؤال‌های مهم")
+    L.append("")
+    for a in (r.get("privacy_answers", []) or []):
+        if a.get("id") == "verdict":
+            continue  # the verdict is the headline above, not a question
+        L.append(f"### {a['question_fa']}")
+        L.append(f"**{a['answer_fa']}**")
+        L.append("")
+    L.append("## این بررسی چه چیزی را می‌گوید")
+    L.append("- فایل برنامه بررسی شد: دسترسی‌ها، جاهایی که اطلاعات "
+             "می‌تواند برود، و بخش‌های اضافه‌ی نسخه‌ی آنلاک.")
+    L.append("- این بررسی فقط چیزهایی را می‌بیند که داخل فایل برنامه "
+             "نوشته شده است.")
+    if r.get("binary", {}).get("encrypted") is True:
+        L.append("- بخشی از فایل برنامه قفل بود و کامل بررسی نشد؛ برای "
+                 "بررسی کامل، نسخه‌ی بازشده لازم است.")
+    L.append("")
+    L.append("sibstars.ir")
+    return "\n".join(L) + "\n"
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="SibStar IPA scanner v7 (deep scan)")
+    ap = argparse.ArgumentParser(description="SibStar IPA scanner v9 (deep scan)")
     ap.add_argument("ipa", help="Path to .ipa file")
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument("--report", dest="report_out", default=None)
+    ap.add_argument("--customer-report", dest="customer_report_out", default=None)
     ap.add_argument("--workdir", default=None)
     args = ap.parse_args(argv)
     workdir = args.workdir or tempfile.mkdtemp(prefix="ipa-scan-v3-")
@@ -2885,6 +3571,9 @@ def main(argv=None):
     if args.report_out:
         Path(args.report_out).write_text(render_report(result), encoding="utf-8")
         print(f"Report written: {args.report_out}")
+    if args.customer_report_out:
+        Path(args.customer_report_out).write_text(render_customer_report(result), encoding="utf-8")
+        print(f"Customer report written: {args.customer_report_out}")
     print(render_report(result))
     return 0
 

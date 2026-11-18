@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-SibStar IPA Scanner — Telegram bot v7 (Telethon / MTProto).
+SibStar IPA Scanner — Telegram bot v9 (Telethon / MTProto).
 
-v7 vs v6: the scanner's privacy answers are decisive now — no
+v9 vs v8: the unlocked version is NORMAL in this store, so the
+summary never calls the mod a problem and never uses the word for
+it as a warning — the unlocked fact is one neutral line ("نسخه
+آنلاک شده"), and the verdict is about DATA SAFETY. The bot sends
+FOUR files per scan: the PNG card + the customer log (.md, plain
+language, safe to forward) + the deep technical log (.md, for
+Erfan only) + the JSON data file (the technical file).
+
+v8 vs v7: the scanner's privacy answers are decisive now — no
 "capability" hedge ("فقط توانایی دارد") anywhere in the summary,
 the card or the report. With no server to send to, the answer is
 "نه — نمی‌فرسته".
@@ -15,8 +23,9 @@ message into a clear ❌ instead of leaving it stuck on a stage, and the
 ✅ "finished" edit only happens when the reports actually went out.
 
 Send the bot a .ipa file, or a direct http(s) link to an .ipa file, and it
-scans it and replies in Persian with a short summary + the full report (.md)
-and data (.json) as documents.
+scans it and replies in Persian with a short summary + FOUR files: the PNG
+card, the customer log (.md, plain language, safe to forward), the deep
+technical log (.md, for the owner only) and the JSON data file.
 
 Why MTProto instead of the Bot API (v2)?
 The Bot API `getFile` download limit is 20 MB. Telethon talks MTProto
@@ -217,11 +226,15 @@ def check_disk_space(directory, needed_bytes):
 def build_summary(r):
     """The short Persian summary the bot sends as a chat message.
 
-    v6: short and professional — the final verdict first, then the
-    (calm, capped) risk with its original/tweak split, then the four
-    privacy answers in one line each. Permissions, trackers, domains
+    v9: short and professional — the final verdict first, then the
+    (calm, capped) risk with its original/added-part split, then the
+    four privacy answers in one line each. The unlocked version is
+    NORMAL in this store: it is stated ONCE, neutrally ("نسخه آنلاک
+    شده"), never as a warning and never with the word for it as a
+    scary label. Only real exfiltration evidence (an unknown server
+    of an added part) is a warning. Permissions, trackers, domains
     and dylib counts are NOT repeated here: they are on the card and
-    in the full report. No alarmist wording.
+    in the full reports. No alarmist wording.
     """
     ident = r.get("identity", {})
     risk = r.get("risk", {})
@@ -232,29 +245,38 @@ def build_summary(r):
     mark = "✅" if verdict_a.get("verdict") == "ok" else "⚠️"
     lines = [f"{mark} اسکن {name} تمام شد — {verdict_a.get('answer_fa', '')}"]
     lines.append(f"📊 ریسک: {risk.get('score', '?')}/100 — {risk.get('level_fa', '')} "
-                 f"(برنامه‌ی اصلی: {risk.get('original_points', '?')}، توئیک: {risk.get('tweak_points', '?')})")
+                 f"(برنامه‌ی اصلی: {risk.get('original_points', '?')}، بخش اضافه: {risk.get('tweak_points', '?')})")
     if tamp.get("tampered"):
-        lines.append(f"🛠 دستکاری شخص ثالث: تأیید شد — {tamp.get('injected_dylib_count', 0)} "
-                     "dylib تزریقی (MobileSubstrate)")
+        lines.append(f"🔓 نسخه آنلاک شده — {tamp.get('injected_dylib_count', 0)} بخش اضافه دارد")
         if tamp.get("unknown_tweak_servers"):
-            lines.append("⚠️ سرور ناشناخته‌ی توئیک: "
+            lines.append("⚠️ سرور ناشناخته‌ی بخش اضافه: "
                          + "، ".join(tamp["unknown_tweak_servers"]))
+        else:
+            lines.append("✅ شواهدی از ارسال داده نیست")
     else:
-        lines.append("🛠 دستکاری شخص ثالث: پیدا نشد")
+        lines.append("🔓 نسخه آنلاک شده: نه")
     if r.get("binary", {}).get("encrypted") is True:
         lines.append("🔒 باینری رمزگذاری‌شده (FairPlay) است — تحلیل رشته‌های باینری انجام نشد.")
     if answers:
         lines.append("")
         lines.append("🔐 حریم خصوصی:")
-        for qid, label in (("tampering", "دستکاری شخص ثالث"),
-                            ("sends_photos_to_server", "ارسال عکس به سرور"),
-                            ("third_party_can_see_photos", "دسترسی شخص ثالث به عکس"),
-                            ("collects_photo_info", "جمع‌آوری اطلاعات عکس")):
+        # v8: photo questions exist only when the app can READ photos.
+        # Otherwise there is ONE plain "does not apply" line — the
+        # three photo answers do not exist for such an app, so the
+        # fixed loop below would print nothing about photos at all.
+        _photo_rows = (("sends_photos_to_server", "ارسال عکس به سرور"),
+                       ("third_party_can_see_photos", "دسترسی شخص ثالث به عکس"),
+                       ("collects_photo_info", "جمع‌آوری اطلاعات عکس")) \
+            if "sends_photos_to_server" in answers else \
+            (("photos_not_applicable", "عکس‌ها"),) \
+            if "photos_not_applicable" in answers else ()
+        for qid, label in (("tampering", "نسخه آنلاک شده"), *_photo_rows):
             a = answers.get(qid)
             if a:
                 lines.append(f"• {label}: {a['answer_fa']}")
     lines.append("")
-    lines.append("📄 گزارش کامل، کارت تصویری و JSON ضمیمه شد. فایل IPA حذف شد.")
+    lines.append("📄 کارت تصویری، گزارش مشتری (برای ارسال به کاربر)، گزارش فنی کامل "
+                 "(فقط برای خودت) و فایل فنی JSON ضمیمه شد. فایل IPA حذف شد.")
     return "\n".join(lines)
 
 
@@ -263,14 +285,14 @@ HELP_FA = (
     "یک فایل .ipa برام بفرست، یا لینک مستقیم دانلود یک فایل .ipa بده، تا امنیت و "
     "حریم خصوصی‌ش رو بررسی کنم و گزارش بدم.\n\n"
     "چی بررسی می‌شه:\n"
-    "• دستکاری شخص ثالث (توئیک): آیا غیر از شرکت اصلی، کسی چیزی به برنامه اضافه کرده؟\n"
+    "• نسخه آنلاک شده: آیا بخش اضافه‌ای دارد و داده به سرور ناشناس می‌فرستد؟\n"
     "• دسترسی‌ها (دوربین، میکروفون، لوکیشن، مخاطبین، ردیابی…)\n"
     "• مانیفست حریم خصوصی (PrivacyInfo.xcprivacy)\n"
     "• ترکرها و SDKها (Firebase، AppsFlyer و…)\n"
     "• لینک‌های ناامن http و تنظیمات ATS\n"
     "• باینری: رمزگذاری FairPlay، کتابخانه‌های لینک‌شده، dylibها و بسته‌های .deb\n\n"
     "📦 حداکثر حجم فایل: ۲ گیگابایت (دانلود با MTProto، مثل لینک‌یار).\n"
-    "🖼 بعد از اسکن، یک کارت تصویری خلاصه، گزارش کامل و فایل JSON می‌فرستم.\n"
+    "🖼 بعد از اسکن، چهار فایل می‌فرستم: کارت تصویری، گزارش مشتری (برای ارسال به کاربر)، گزارش فنی کامل (فقط برای خودت) و فایل فنی JSON.\n"
     "🗑 فایل IPA بعد از اسکن و ارسال گزارش حذف می‌شود؛ چیزی ذخیره نمی‌شود.\n"
     "⏳ در طول اسکن یک پیام پیشرفت با ۶ مرحله می‌بینی: دانلود، استخراج، "
     "اسکن باینری، آنالیز dylib و deb، ساخت گزارش، ارسال و پاک کردن.\n"
@@ -622,12 +644,22 @@ class ScannerBot:
                         f"{result.get('dylib_count', 0)} dylib و "
                         f"{result.get('deb_count', 0)} بسته deb")
         await set_stage(prog_msg, 5)
+        # FOUR files per scan (v9): the PNG card + the customer log
+        # (plain language, safe to forward to the customer) + the deep
+        # technical log (for Erfan only) + the JSON data file (the
+        # technical file). The customer log and the deep log are two
+        # SEPARATE .md files — the deep detail must be a readable log,
+        # not only JSON.
+        from scanner import render_customer_report
         report_md = render_report(result)
+        customer_md = render_customer_report(result)
         report_json = json.dumps(result, ensure_ascii=False, indent=2)
         base = Path(file_name).stem or "app"
         md_path = tmpdir / f"{base}-scan-report.md"
+        customer_path = tmpdir / f"{base}-customer-report.md"
         json_path = tmpdir / f"{base}-scan.json"
         md_path.write_text(report_md, encoding="utf-8")
+        customer_path.write_text(customer_md, encoding="utf-8")
         json_path.write_text(report_json, encoding="utf-8")
         # Summary image card (Pillow). If Pillow is missing the scan still
         # succeeds — the card is skipped, never a reason to fail the scan.
@@ -647,11 +679,14 @@ class ScannerBot:
                 await self.client.send_file(event.chat_id, str(card_path),
                                             caption="کارت خلاصه‌ی اسکن",
                                             force_document=False)
+            await self.client.send_file(event.chat_id, str(customer_path),
+                                        caption="گزارش مشتری — برای ارسال به کاربر",
+                                        force_document=True)
             await self.client.send_file(event.chat_id, str(md_path),
-                                        caption="گزارش کامل اسکن (Markdown)",
+                                        caption="گزارش فنی کامل — فقط برای خودت",
                                         force_document=True)
             await self.client.send_file(event.chat_id, str(json_path),
-                                        caption="داده‌ی کامل اسکن (JSON)",
+                                        caption="فایل فنی کامل (JSON)",
                                         force_document=True)
             sent_ok = True
         except Exception:
@@ -661,6 +696,7 @@ class ScannerBot:
         finally:
             # Reports are temp outputs too: remove them as soon as they are sent.
             md_path.unlink(missing_ok=True)
+            customer_path.unlink(missing_ok=True)
             json_path.unlink(missing_ok=True)
             if card_path is not None:
                 card_path.unlink(missing_ok=True)

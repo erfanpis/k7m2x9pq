@@ -2,23 +2,31 @@
 """SibStar IPA Scanner — PNG summary card (customer version).
 
 The card is shown to NON-TECHNICAL end customers who do not
-understand security terms, so it speaks plain simple Persian:
-- No jargon anywhere on the card: no "dylib", no "MobileSubstrate",
-  no "توئیک", no "IPA", no "تحلیل ایستا", no "ATS", no bundle ID,
-  no technical finding titles. Technical detail stays in the .md
-  report only.
-- The verdict is one friendly sentence a regular person
-  understands ("این نسخه دستکاری شده است؛ با احتیاط استفاده
-  کنید" / "مشکلی پیدا نشد؛ با خیال راحت استفاده کنید").
-- The four privacy answers are plain questions ("عکس‌ها
-  فرستاده می‌شوند؟") with plain one-line answers and
-  descriptive verdict pills ("سالم"، "دستکاری شده"، "نه") —
-  never a bare alarming "بله".
-- The score is shown as a ring gauge with one plain line
-  explaining it ("هرچه عدد کمتر باشد، بهتر است").
-- Calm colours, generous spacing, no red-everywhere: the gauge
-  arc, the verdict dot, the tampering panel and the pills are
-  the only coloured elements.
+understand security terms, so it is MINIMAL and BEAUTIFUL: a regular
+person must understand the whole card in 5 seconds and find it
+beautiful — this is what Erfan shows the customer.
+- App name + version, ONE score with ONE plain line explaining it
+  ("هرچه عدد کمتر باشد، بهتر است"), ONE headline sentence with the
+  verdict, and at most 4 short question lines — each a plain
+  question, a one-word pill ("نه" / "بله") and one short evidence line.
+- NO stats row with big scary numbers, NO "41 اتصال بدون محافظت"
+  counts, NO technical notes, NO duplicated messages, NO jargon of
+  any kind (no "dylib", no "MobileSubstrate", no "توئیک", no "IPA",
+  no "تحلیل ایستا", no "ATS", no bundle ID, no raw domains).
+  The full detail stays in the deep .md report and the JSON, which
+  are for Erfan only.
+- v9: the unlocked version is NORMAL in this store, so the card
+  never says the mod is a problem. The question row is "نسخه آنلاک
+  شده؟" with a NEUTRAL pill "بله" (grey/blue, never red) and a plain
+  line; the headline is about DATA SAFETY — "مشکلی پیدا نشد؛ با
+  خیال راحت استفاده کنید" when no exfiltration evidence, and
+  "این نسخه اطلاعات شما را به سروری ناشناس می‌فرستد؛ نصب نکنید"
+  only when the added part really sends data (its own unknown
+  server AND an upload endpoint). The word for the mod is
+  "آنلاک شده" — the word "دستکاری" appears nowhere on the card.
+- Calm colours, generous white space, clean spacing, elegant
+  typography. The score ring is the only large coloured element, and
+  the headline sits on a soft tinted band in the risk colour.
 
 Design:
 - Soft-grey page, white rounded card, one dark-slate header band
@@ -41,10 +49,11 @@ Usage:
 import re
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+from scanner import _photo_upload_domains
 
 from PIL import Image, ImageDraw, ImageFont
 from PIL import features as _pil_features
@@ -88,7 +97,7 @@ def is_persian(text):
 
 # Verdict words for the detailed report / bot summary. The CARD does
 # not use these: its pills use plain customer words from
-# _customer_pill ("سالم"، "دستکاری شده"، "نه") instead.
+# _customer_pill ("بله"، "نه") instead.
 VERDICT_FA = {
     "confirmed": "تأیید شد",
     "no-evidence": "شواهدی نیست",
@@ -99,13 +108,12 @@ VERDICT_FA = {
 }
 
 # Calm palette. Colour is used sparingly: the gauge arc, the verdict
-# dot, the tampering panel and the verdict pills — never red-everywhere.
+# dot and the verdict pills — never red-everywhere.
 RISK_COLORS = {
     "low": (21, 128, 61),      # calm green
     "medium": (180, 83, 9),    # calm amber
     "high": (185, 28, 28),     # muted red (not bright alarm red)
 }
-RISK_DARK = {"low": (20, 83, 45), "medium": (120, 53, 15), "high": (127, 29, 29)}
 
 # Verdict pills: green = good news, red = bad news, amber = caution.
 PILL_GREEN = ((220, 252, 231), (22, 101, 52))
@@ -118,15 +126,17 @@ def _customer_pill(qid, verdict):
     """(pill text, (bg, fg)) for a privacy answer — plain words a
     regular person understands, never a bare alarming "بله".
 
-    "سالم" (clean) for no tampering, "دستکاری شده" for confirmed
-    tampering, "نه" for "no, your photos are not sent", "اعلام شده"
-    for declared photo collection (a neutral fact, amber).
+    v9: the unlocked row is NEUTRAL — "بله" in grey/blue slate,
+    never red: an unlocked version is normal in this store. "نه"
+    (green) for the original version. "مشکوک" (amber) only when a
+    single weak signal was found.
+    "اعلام شده" for declared photo collection (a neutral fact, amber).
     """
     if verdict == "suspicious":
         return "مشکوک", PILL_AMBER
     if qid == "tampering":
-        return {"confirmed": ("دستکاری شده", PILL_RED),
-                "no-evidence": ("سالم", PILL_GREEN)}.get(verdict, ("—", PILL_SLATE))
+        return {"confirmed": ("بله", PILL_SLATE),
+                "no-evidence": ("نه", PILL_GREEN)}.get(verdict, ("—", PILL_SLATE))
     if qid == "collects_photo_info":
         return {"confirmed": ("اعلام شده", PILL_AMBER),
                 "no-evidence": ("نه", PILL_GREEN)}.get(verdict, ("—", PILL_SLATE))
@@ -139,76 +149,113 @@ def _customer_pill(qid, verdict):
 
 
 def _customer_answers(result, answers):
-    """Plain one-line answers for the four questions, in the
-    customer's language. The scanner's answer_fa strings are for
-    the detailed .md report; the card rephrases them here so no
-    jargon ("نقطه‌ی آپلودی"، "dylib"، "توئیک") ever reaches a
-    customer."""
+    """Plain one-line answers for the questions, in the customer's
+    language. The scanner's answer_fa strings are for the detailed
+    .md report; the card rephrases them here so no jargon
+    ("نقطه‌ی آپلودی"، "dylib"، "توئیک") ever reaches a customer.
+
+    The answers follow the ANSWER VERDICTS, not a re-derivation:
+    when the verdict is "confirmed" (the dangerous case — the added
+    part has its own server AND a photo-upload endpoint exists), the
+    card says YES plainly. Otherwise it says a decisive "no".
+    The unlocked line states the fact ONCE, neutrally: this version
+    is unlocked, and either no data goes to an unknown server, or —
+    in the dangerous case — it does. No counts, no jargon.
+    """
     tamp = result.get("tampering") or {}
-    n_injected = tamp.get("injected_dylib_count", 0)
-    unknown = tamp.get("unknown_tweak_servers") or []
-    try:
-        from scanner import _photo_upload_domains
-        has_upload = bool(_photo_upload_domains(result.get("domains", []) or []))
-    except Exception:
-        has_upload = False
+    _unknown = tamp.get("unknown_tweak_servers") or []
+    _upload = _photo_upload_domains(result.get("domains", []))
+    _dangerous = bool(_unknown and _upload)
     out = {}
     v5 = (answers.get("tampering", {}) or {}).get("verdict", "")
     if v5 == "confirmed":
-        out["tampering"] = (f"این نسخه دستکاری شده؛ {n_injected} بخش اضافه "
-                            "از یک منبع دیگر داخل آن هست")
+        if _dangerous:
+            out["tampering"] = "این نسخه آنلاک شده است؛ اطلاعات به سرور ناشناس فرستاده می‌شود"
+        elif _unknown:
+            out["tampering"] = "این نسخه آنلاک شده است؛ با یک سرور ناشناس حرف می‌زند"
+        else:
+            out["tampering"] = "این نسخه آنلاک شده است؛ داده‌ای به سرور ناشناس فرستاده نمی‌شود"
     elif v5 == "suspicious":
-        out["tampering"] = "به نظر می‌رسد دستکاری شده باشد؛ با احتیاط استفاده کنید"
+        out["tampering"] = "یک بخش اضافه پیدا شد؛ مدرکی از ارسال داده نیست"
     else:
-        out["tampering"] = "نشانه‌ای از دستکاری پیدا نشد"
-    if has_upload:
-        out["sends_photos_to_server"] = "مدرکی از فرستادن عکس پیدا نشد"
+        out["tampering"] = "این نسخه آنلاک نشده است"
+    v1 = (answers.get("sends_photos_to_server", {}) or {}).get("verdict", "")
+    if v1 == "confirmed":
+        out["sends_photos_to_server"] = "عکس‌ها به یک آدرس ناشناس فرستاده می‌شوند"
     else:
         out["sends_photos_to_server"] = "عکس‌های شما جایی فرستاده نمی‌شود"
-    if unknown:
-        out["third_party_can_see_photos"] = "مدرکی از دیدن عکس پیدا نشد"
+    v2 = (answers.get("third_party_can_see_photos", {}) or {}).get("verdict", "")
+    if v2 == "confirmed":
+        out["third_party_can_see_photos"] = "عکس‌های شما به یک آدرس ناشناس می‌رسد"
     else:
         out["third_party_can_see_photos"] = "کسی عکس‌های شما را نمی‌بیند"
     v3 = (answers.get("collects_photo_info", {}) or {}).get("verdict", "")
     if v3 == "confirmed":
         out["collects_photo_info"] = "در توضیحات برنامه اعلام شده است"
     else:
-        out["collects_photo_info"] = "جمع‌آوری عکس اعلام نشده است"
+        # v8: decisive — "اعلام نشده است" hedged and implied it might
+        # still collect. The app does not collect photo info.
+        out["collects_photo_info"] = "این برنامه اطلاعات عکس جمع نمی‌کند"
     return out
+
+
+def _card_questions(result, answers):
+    """The question rows the card actually shows — a list of
+    {"qid", "label", "pill", "text"} dicts.
+
+    v9: photo questions are shown ONLY when the app can READ photos.
+    Otherwise there is ONE plain row saying the app does not read
+    the user's photos (add-only: it can only save a screenshot).
+    The first row is always the unlocked question, neutral.
+    """
+    plain_answers = _customer_answers(result, answers)
+    rows = []
+    a = answers.get("tampering", {}) or {}
+    pill_text, pill_colors = _customer_pill("tampering", a.get("verdict", ""))
+    rows.append({"qid": "tampering", "label": "نسخه آنلاک شده؟",
+                 "pill": (pill_text, pill_colors),
+                 "text": plain_answers.get("tampering", "")})
+    if result.get("photo_read_access", True):
+        for qid, label in (
+                ("sends_photos_to_server", "عکس‌ها فرستاده می‌شوند؟"),
+                ("third_party_can_see_photos", "کسی دیگر عکس‌ها را می‌بیند؟"),
+                ("collects_photo_info", "اطلاعات عکس جمع می‌شود؟")):
+            a = answers.get(qid, {}) or {}
+            pill_text, pill_colors = _customer_pill(qid, a.get("verdict", ""))
+            rows.append({"qid": qid, "label": label,
+                         "pill": (pill_text, pill_colors),
+                         "text": plain_answers.get(qid, "")})
+    else:
+        # v8: one plain row, not three photo questions the app
+        # cannot answer — it never touches the user's photos.
+        if result.get("photo_access") == "add-only":
+            text = ("این برنامه عکس‌های شما را نمی‌خواند؛ فقط می‌تواند "
+                    "اسکرین‌شات ذخیره کند")
+        else:
+            text = "این برنامه به عکس‌های شما دسترسی ندارد"
+        rows.append({"qid": "photos_not_applicable", "label": "عکس‌های شما",
+                     "pill": ("نه", PILL_GREEN), "text": text})
+    return rows
 
 
 def _customer_headline(result, level_en):
     """The verdict as ONE friendly sentence a regular person
-    understands."""
+    understands. v9: the verdict is about DATA SAFETY, not about the
+    mod — a modded app with no exfiltration evidence gets the calm
+    "no problem" headline. Only confirmed sending (the added part's
+    own unknown server AND an upload endpoint) gets the decisive
+    "don't install" headline. Otherwise the headline follows the
+    risk level."""
     tamp = result.get("tampering") or {}
-    if tamp.get("tampered"):
-        return "این نسخه دستکاری شده است؛ با احتیاط استفاده کنید"
+    _unknown = tamp.get("unknown_tweak_servers") or []
+    _upload = _photo_upload_domains(result.get("domains", []))
+    if _unknown and _upload:
+        return "این نسخه اطلاعات شما را به سروری ناشناس می‌فرستد؛ نصب نکنید"
     if level_en == "low":
         return "مشکلی پیدا نشد؛ با خیال راحت استفاده کنید"
     if level_en == "medium":
         return "خطر جدی پیدا نشد؛ چند نکته‌ی کوچک هست"
     return "چند نکته‌ی مهم پیدا شد؛ با احتیاط استفاده کنید"
-
-
-def _customer_notes(result):
-    """Plain-language notes (max 3) for the "نکته‌های مهم" section,
-    derived from the result data — never from technical finding
-    titles, which are full of jargon and live in the .md report."""
-    tamp = result.get("tampering") or {}
-    unknown = tamp.get("unknown_tweak_servers") or []
-    notes = []
-    if tamp.get("tampered"):
-        notes.append("این نسخه دستکاری شده؛ بخش‌های اضافه داخل آن هست")
-    if unknown:
-        notes.append("بخش اضافه با یک آدرس ناشناس در تماس است")
-    n_http = len(result.get("insecure_http_urls", []) or [])
-    if n_http:
-        notes.append(f"{n_http} اتصال بدون محافظت پیدا شد")
-    n_trackers = len(result.get("known_trackers", []) or [])
-    if n_trackers:
-        notes.append(f"{n_trackers} ابزار ردیابی در برنامه هست")
-    notes = notes[:3]
-    return notes or ["چیز مهم دیگری پیدا نشد."]
 
 
 FONT_CANDIDATES = [
@@ -274,11 +321,11 @@ def draw_rtl(draw, x_right, y, text, font, fill):
     return y + int(font.size * 1.4)
 
 
-def draw_pill(draw, x0, y_center, text, font, bg, fg, h=40, pad_x=20):
+def draw_pill(draw, x0, y_center, text, font, bg, fg, h=44, pad_x=22):
     """A rounded verdict pill, vertically centred on y_center.
     Returns the pill width. Text is centred (anchor mm)."""
     tw = draw.textlength(fa(text), font=font)
-    w = max(132, int(tw) + 2 * pad_x)
+    w = max(136, int(tw) + 2 * pad_x)
     y0 = y_center - h // 2
     draw.rounded_rectangle([x0, y0, x0 + w, y0 + h], radius=h // 2,
                            fill=bg + (255,))
@@ -289,225 +336,148 @@ def draw_pill(draw, x0, y_center, text, font, bg, fg, h=40, pad_x=20):
 
 def draw_gauge(draw, cx, cy, r, score, color):
     """A ring gauge: light track + coloured arc (score % of 360°)."""
-    track = (226, 232, 240)
+    track = (229, 231, 235)
     draw.ellipse([cx - r, cy - r, cx + r, cy + r],
-                 outline=track + (255,), width=13)
+                 outline=track + (255,), width=14)
     if score > 0:
         sweep = 360 * max(0, min(100, score)) / 100
         draw.arc([cx - r, cy - r, cx + r, cy + r], start=-90,
-                 end=-90 + sweep, fill=color + (255,), width=13)
+                 end=-90 + sweep, fill=color + (255,), width=14)
 
 
-def draw_split_bar(layer, x, y, w, h, orig, tweak, total):
-    """A rounded horizontal bar split original (slate, from the right)
-    vs added parts (amber, to its left). Rounded corners via a mask, so
-    the segments never poke out of the track's rounded ends."""
-    bar = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    bd = ImageDraw.Draw(bar)
-    bd.rectangle([0, 0, w, h], fill=(226, 232, 240, 255))
-    if total > 0:
-        ow = int(round(w * orig / total))
-        tw = w - ow
-        if ow > 0:
-            bd.rectangle([w - ow, 0, w, h], fill=(51, 65, 85, 255))
-        if tw > 0:
-            bd.rectangle([w - ow - tw, 0, w - ow, h], fill=(217, 119, 6, 255))
-    mask = Image.new("L", (w, h), 0)
-    md = ImageDraw.Draw(mask)
-    md.rounded_rectangle([0, 0, w, h], radius=h // 2, fill=255)
-    layer.paste(bar, (x, y), mask)
+def _tint(color, frac=0.08):
+    """A very soft tint of a risk colour (mostly white) for the
+    headline band — calm, never alarming."""
+    return tuple(int(255 * (1 - frac) + c * frac) for c in color)
 
 
 def generate_report_card(result, out_path):
     """Render the summary card PNG for a scan result dict. Returns out_path."""
     out_path = Path(out_path)
     W = 1200
-    M = 72  # margin — wider than before, for a more premium feel
-    BG = (243, 244, 246)
+    M = 76  # margin — wide, for a premium feel
+    BG = (247, 248, 250)
     CARD = (255, 255, 255)
+    SHADOW = (222, 226, 232)
     INK = (15, 23, 42)
     MUTED = (100, 116, 139)
-    LINE = (226, 232, 240)
-    HEADER = (30, 41, 59)  # dark slate, not red
-    BOX = (249, 250, 251)
+    LINE = (229, 231, 235)
+    HEADER = (27, 38, 55)  # deep slate, not red
 
     risk = result.get("risk", {}) or {}
     score = int(risk.get("score", 0) or 0)
     level_en = risk.get("level_en", "low") or "low"
-    level_fa = risk.get("level_fa", "") or ""
     color = RISK_COLORS.get(level_en, RISK_COLORS["low"])
-    dark = RISK_DARK.get(level_en, RISK_DARK["low"])
     ident = result.get("identity", {}) or {}
     name = ident.get("display_name") or "برنامه"
     version = ident.get("version") or "—"
     min_os = ident.get("minimum_os") or "—"
     answers = {a["id"]: a for a in (result.get("privacy_answers", []) or [])}
-    tamp = result.get("tampering") or {}
-    orig_pts = risk.get("original_points", 0) or 0
-    tweak_pts = risk.get("tweak_points", 0) or 0
-    plain_answers = _customer_answers(result, answers)
+    # v9: every customer-facing string drawn on this card, in order —
+    # tests use it to prove no scary or technical word reaches a
+    # customer, and the photo questions are gone when they do not apply.
+    texts = []
 
     # Content layer (transparent); the card is sized to the content
     # afterwards, so nothing can overflow or leave a half-empty card.
-    layer = Image.new("RGBA", (W, 2400), (0, 0, 0, 0))
+    layer = Image.new("RGBA", (W, 2600), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
     CW = W - 2 * M  # content width
 
-    # ---- Header band (dark slate) with a thin accent strip ----
-    draw.rounded_rectangle([24, 24, W - 24, 138], radius=28, fill=HEADER + (255,))
-    draw.rectangle([24, 110, W - 24, 138], fill=HEADER + (255,))
+    # ---- Header band (deep slate) with a thin accent strip ----
+    draw.rounded_rectangle([24, 24, W - 24, 150], radius=30, fill=HEADER + (255,))
+    draw.rectangle([24, 118, W - 24, 150], fill=HEADER + (255,))
     # Accent strip in the risk colour, clipped to the band's bottom.
     strip = Image.new("RGBA", (W - 48, 6), (0, 0, 0, 0))
     sd = ImageDraw.Draw(strip)
     sd.rectangle([0, 0, W - 48, 6], fill=color + (255,))
-    layer.paste(strip, (24, 132), strip)
-    f_title = load_font(32, bold=True)
-    draw.text((W - M, 44), fa("سیب‌استار — گزارش بررسی برنامه"), font=f_title,
+    layer.paste(strip, (24, 144), strip)
+    f_title = load_font(34, bold=True)
+    draw.text((W - M, 48), fa("سیب‌استار — گزارش بررسی برنامه"), font=f_title,
               fill=(255, 255, 255, 255), anchor="ra")
     f_sub = load_font(22)
-    draw.text((W - M, 92), fa("بررسی امنیت و حریم خصوصی"),
+    draw.text((W - M, 100), fa("بررسی امنیت و حریم خصوصی"),
               font=f_sub, fill=(203, 213, 225, 255), anchor="ra")
 
     # ---- Hero: app identity (right) + score ring (left) ----
     # No bundle ID on the card: customers do not care about it and
     # it only jumbles the bidi layout. One plain version line only.
-    y = 172
-    f_name = load_font(42, bold=True)
-    for line in wrap_text(draw, name, f_name, CW - 260):
+    y = 186
+    f_name = load_font(44, bold=True)
+    for line in wrap_text(draw, name, f_name, CW - 280):
         y = draw_rtl(draw, W - M, y, line, f_name, INK + (255,))
-    y += 6
+    y += 10
     f_meta = load_font(24)
     y = draw_rtl(draw, W - M, y, f"نسخه {version}  •  نیاز به iOS {min_os} به بالا",
                  f_meta, MUTED + (255,))
     hero_text_bottom = y
 
-    cx, cy, r = 168, 282, 76
+    cx, cy, r = 172, 300, 82
     draw_gauge(draw, cx, cy, r, score, color)
-    f_score = load_font(56, bold=True)
+    f_score = load_font(60, bold=True)
     draw.text((cx, cy - 6), str(score), font=f_score, fill=INK + (255,),
               anchor="mm")
     f_outof = load_font(20)
-    draw.text((cx, cy + 40), "/100", font=f_outof, fill=MUTED + (255,), anchor="mm")
-    f_level = load_font(26, bold=True)
-    draw.text((cx, cy + r + 28), fa(f"ریسک {level_fa}"), font=f_level,
-              fill=dark + (255,), anchor="mm")
-    # The score explained in one plain line: lower is better.
+    draw.text((cx, cy + 42), "/100", font=f_outof, fill=MUTED + (255,), anchor="mm")
+    # The score explained in ONE plain line: lower is better. No
+    # "ریسک بالا" label under the ring — the headline sentence below
+    # carries the verdict, and a second verdict word next to the
+    # number only repeats (and scares).
     f_caption = load_font(20)
-    draw.text((cx, cy + r + 62), fa("هرچه عدد کمتر باشد، بهتر است"),
+    draw.text((cx, cy + r + 30), fa("هرچه عدد کمتر باشد، بهتر است"),
               font=f_caption, fill=MUTED + (255,), anchor="mm")
-    y = max(hero_text_bottom, cy + r + 62 + 26) + 26
+    y = max(hero_text_bottom, cy + r + 30 + 26) + 36
 
-    # ---- Verdict headline: ONE friendly sentence, with a coloured dot ----
-    f_verdict = load_font(28, bold=True)
+    # ---- Verdict headline: ONE friendly sentence on a soft tinted
+    # band in the risk colour, with a coloured dot ----
+    f_verdict = load_font(29, bold=True)
     headline = _customer_headline(result, level_en)
-    draw.ellipse([W - M - 13, y + 12, W - M + 1, y + 26],
+    texts.append(headline)
+    _hl_lines = wrap_text(draw, headline, f_verdict, CW - 96)
+    _hl_h = int(len(_hl_lines) * f_verdict.size * 1.4)
+    draw.rounded_rectangle([M - 16, y - 18, W - M + 16, y + _hl_h + 18],
+                           radius=24, fill=_tint(color) + (255,))
+    draw.ellipse([W - M - 13, y + 14, W - M + 1, y + 28],
                  fill=color + (255,))
-    for line in wrap_text(draw, headline, f_verdict, CW - 28):
-        y = draw_rtl(draw, W - M - 28, y, line, f_verdict, INK + (255,))
-    y += 6
+    for line in _hl_lines:
+        y = draw_rtl(draw, W - M - 30, y, line, f_verdict, INK + (255,))
+    y += 18 + 18
 
-    # ---- Tampering panel: soft background, icon circle at the right ----
-    # Plain words only: "بخش اضافه" instead of "dylib"/"MobileSubstrate",
-    # "آدرس ناشناس" instead of "سرور ناشناخته‌ی توئیک".
-    tampered = bool(tamp.get("tampered"))
-    suspicious = tamp.get("verdict") == "suspicious"
-    if tampered:
-        panel_bg, panel_ink = (254, 243, 199), (146, 64, 14)
-        icon, icon_bg = "!", (217, 119, 6)
-        panel_line = "این نسخه دستکاری شده است"
-    elif suspicious:
-        panel_bg, panel_ink = (254, 243, 199), (146, 64, 14)
-        icon, icon_bg = "!", (217, 119, 6)
-        panel_line = "به نظر می‌رسد این نسخه دستکاری شده باشد"
-    else:
-        panel_bg, panel_ink = (236, 253, 245), (6, 95, 70)
-        icon, icon_bg = "✓", (22, 163, 74)
-        panel_line = "این نسخه دستکاری نشده است"
-    f_panel = load_font(26, bold=True)
-    panel_lines = wrap_text(draw, panel_line, f_panel, CW - 32 - 56)
-    sub_lines = []
-    if tamp.get("unknown_tweak_servers"):
-        f_sub2 = load_font(24, bold=True)
-        sub_lines = wrap_text(
-            draw, "آدرس ناشناس: " + "، ".join(tamp["unknown_tweak_servers"]),
-            f_sub2, CW - 32 - 56)
-    panel_h = 24 + 36 * len(panel_lines) + (34 * len(sub_lines) if sub_lines else 0) + 22
-    draw.rounded_rectangle([M, y, W - M, y + panel_h], radius=16,
-                           fill=panel_bg + (255,))
-    # Icon circle at the panel's right edge.
-    icx, icy = W - M - 16 - 17, y + panel_h // 2
-    draw.ellipse([icx - 17, icy - 17, icx + 17, icy + 17], fill=icon_bg + (255,))
-    f_icon = load_font(24, bold=True)
-    draw.text((icx, icy - 1), icon, font=f_icon, fill=(255, 255, 255, 255),
-              anchor="mm")
-    py = y + 22
-    for line in panel_lines:
-        py = draw_rtl(draw, W - M - 16 - 46, py, line, f_panel, panel_ink + (255,))
-    if sub_lines:
-        f_sub2 = load_font(24, bold=True)
-        for line in sub_lines:
-            py = draw_rtl(draw, W - M - 16 - 46, py, line, f_sub2, panel_ink + (255,))
-    y += panel_h + 24
+    # ---- Divider: the headline is the verdict; everything below is
+    # just the questions. No panel, no composition bar, no stats row
+    # — the v7 card's extra numbers and repeated warnings are gone.
+    # The unknown server, when one exists, is already inside the
+    # photo answers ("به یک آدرس ناشناس فرستاده می‌شوند"), never as
+    # a separate scary line with a raw address.
+    draw.line([M, y, W - M, y], fill=LINE + (255,), width=1)
+    y += 30
 
-    # ---- Risk composition bar: where did this score come from? ----
-    f_bar_label = load_font(22)
-    y = draw_rtl(draw, W - M, y, "این امتیاز از کجا آمده؟", f_bar_label, MUTED + (255,))
-    y += 4
-    total_pts = orig_pts + tweak_pts
-    draw_split_bar(layer, M, y, CW, 16, orig_pts, tweak_pts,
-                   total_pts if total_pts > 0 else 1)
-    y += 16 + 10
-    f_split = load_font(24)
-    split = (f"برنامه‌ی اصلی: {orig_pts}  •  بخش‌های اضافه: {tweak_pts}")
-    y = draw_rtl(draw, W - M, y, split, f_split, MUTED + (255,))
-    y += 26
-
-    # ---- Plain facts: one row of four boxes, no unexplained numbers ----
-    stats = [
-        ("دسترسی‌ها", str(result.get("permission_count", 0))),
-        ("آدرس‌های اینترنتی", str(len(result.get("domains", []) or []))),
-        ("بخش‌های اضافه", str(tamp.get("injected_dylib_count", 0))),
-        ("اتصال بدون محافظت", str(len(result.get("insecure_http_urls", []) or []))),
-    ]
-    col_w = CW // 4
-    f_stat_n = load_font(38, bold=True)
-    f_stat_l = load_font(22)
-    for i, (label, value) in enumerate(stats):
-        x0 = M + i * col_w
-        draw.rounded_rectangle([x0, y, x0 + col_w - 14, y + 92], radius=16,
-                               fill=BOX + (255,), outline=LINE + (255,), width=1)
-        draw.text((x0 + (col_w - 14) // 2, y + 12), value, font=f_stat_n,
-                  fill=INK + (255,), anchor="ma")
-        draw.text((x0 + (col_w - 14) // 2, y + 56), fa(label), font=f_stat_l,
-                  fill=MUTED + (255,), anchor="ma")
-    y += 92 + 26
-
-    # ---- The four questions, in the customer's own words ----
-    f_q = load_font(26, bold=True)
-    f_a_label = load_font(25, bold=True)
+    # ---- The questions, in the customer's own words ----
+    # v9: _card_questions decides which rows exist — photo questions
+    # only when the app can READ photos; otherwise one plain row
+    # saying it does not read the user's photos.
+    f_q = load_font(27, bold=True)
+    f_a_label = load_font(26, bold=True)
     f_a_text = load_font(24)
     draw.text((W - M, y), fa("سؤال‌های مهم"), font=f_q,
               fill=INK + (255,), anchor="ra")
-    y += 44
-    q_labels = [
-        ("tampering", "دستکاری شده؟"),
-        ("sends_photos_to_server", "عکس‌ها فرستاده می‌شوند؟"),
-        ("third_party_can_see_photos", "کسی دیگر عکس‌ها را می‌بیند؟"),
-        ("collects_photo_info", "اطلاعات عکس جمع می‌شود؟"),
-    ]
+    y += 50
+    q_rows = _card_questions(result, answers)
     f_pill = load_font(23, bold=True)
-    for idx, (qid, label) in enumerate(q_labels):
-        a = answers.get(qid, {}) or {}
-        pill_text, (bg, fg) = _customer_pill(qid, a.get("verdict", ""))
-        answer_text = plain_answers.get(qid, "")
-        text_w = CW - 190
+    for idx, row in enumerate(q_rows):
+        pill_text, (bg, fg) = row["pill"]
+        answer_text = row["text"]
+        label = row["label"]
+        texts.append(label)
+        texts.append(answer_text)
+        text_w = CW - 200
         ans_lines = wrap_text(draw, answer_text, f_a_text, text_w)
         if len(ans_lines) > 2:
             # Truncate at a word boundary, never mid-word.
             cut = ans_lines[1]
             cut = cut[:cut.rfind(" ")].rstrip() if " " in cut else cut
             ans_lines = [ans_lines[0], cut + "…"]
-        row_h = 35 + 34 * len(ans_lines) + 16
+        row_h = 46 + 34 * len(ans_lines) + 20
         # Pill, vertically centred on the row, at the far left.
         draw_pill(draw, M, y + row_h // 2, pill_text, f_pill, bg, fg)
         # Label (bold) + short answer (muted), right-aligned.
@@ -516,49 +486,42 @@ def generate_report_card(result, out_path):
         for line in ans_lines:
             ty = draw_rtl(draw, W - M, ty, line, f_a_text, MUTED + (255,))
         y += row_h
-        if idx < len(q_labels) - 1:
+        if idx < len(q_rows) - 1:
             draw.line([M, y - 4, W - M, y - 4], fill=LINE + (255,), width=1)
-    y += 18
+    y += 32
 
-    # ---- Important notes, in plain words ----
-    draw.text((W - M, y), fa("نکته‌های مهم"), font=f_q, fill=INK + (255,),
-              anchor="ra")
-    y += 42
-    for note in _customer_notes(result):
-        lines = wrap_text(draw, note, f_a_text, CW - 34)
-        if len(lines) > 2:
-            cut = lines[1]
-            cut = cut[:cut.rfind(" ")].rstrip() if " " in cut else cut
-            lines = [lines[0], cut + "…"]
-        draw.ellipse([W - M - 13, y + 9, W - M + 1, y + 23],
-                     fill=(100, 116, 139, 255))
-        for line in lines:
-            y = draw_rtl(draw, W - M - 26, y, line, f_a_text,
-                         (51, 65, 85, 255))
-        y += 8
-    y += 14
-
-    # ---- Footer ----
+    # ---- Footer: one plain line about what the check covered, and the
+    # brand. No timestamp, no counts, no notes section — the v7
+    # "نکته‌های مهم" ("41 اتصال بدون محافظت…") scared customers with
+    # bare numbers; the detail lives in the deep report and the JSON
+    # for Erfan only.
     draw.line([M, y, W - M, y], fill=LINE + (255,), width=1)
-    y += 16
-    H = y + 96
+    y += 22
+    H = y + 100
     f_foot = load_font(21)
-    draw.text((W - M, H - 84), fa("این بررسی فقط روی فایل برنامه انجام شده است."),
+    draw.text((W - M, H - 88), fa("این بررسی فقط روی فایل برنامه انجام شده است."),
               font=f_foot, fill=MUTED + (255,), anchor="ra")
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    draw.text((W - M, H - 52), fa(f"sibstars.ir  •  {stamp}"), font=f_foot,
+    draw.text((W - M, H - 54), fa("sibstars.ir"), font=f_foot,
               fill=MUTED + (255,), anchor="ra")
 
-    # Compose: soft-grey page, white rounded card, content on top.
+    # Compose: soft-grey page, white rounded card with a soft shadow,
+    # content on top.
     img = Image.new("RGBA", (W, H), BG + (255,))
     card_draw = ImageDraw.Draw(img)
-    card_draw.rounded_rectangle([24, 24, W - 24, H - 24], radius=28,
+    card_draw.rounded_rectangle([24, 32, W - 24, H - 18], radius=32,
+                                fill=SHADOW + (255,))
+    card_draw.rounded_rectangle([24, 24, W - 24, H - 24], radius=32,
                                 fill=CARD + (255,), outline=LINE + (255,), width=2)
     img.alpha_composite(layer.crop((0, 0, W, H)))
     img = img.convert("RGB")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path, format="PNG")
+    # Every customer-facing string on this card, in order — tests use
+    # it to prove no scary or technical word reaches a customer, the
+    # photo questions are gone when they do not apply, and the
+    # unlocked fact is stated once, neutrally.
+    generate_report_card.last_texts = texts
     return out_path
 
 
