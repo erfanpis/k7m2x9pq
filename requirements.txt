@@ -1,0 +1,2 @@
+# No third-party dependencies — Python standard library only (3.8+).
+# scanner.py and bot.py run with:  python3 scanner.py ...  /  python3 bot.py
