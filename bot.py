@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """
-SibStar IPA Scanner — Telegram bot v4 (Telethon / MTProto).
+SibStar IPA Scanner — Telegram bot v6 (Telethon / MTProto).
+
+v6 vs v5: the chat summary is short (verdict first, risk, four privacy
+answers — no permission/tracker/domain lists, those live on the card and
+in the report); error messages are plain Persian (raw exceptions go to
+the server log, never to the user); a failed scan turns the progress
+message into a clear ❌ instead of leaving it stuck on a stage, and the
+✅ "finished" edit only happens when the reports actually went out.
 
 Send the bot a .ipa file, or a direct http(s) link to an .ipa file, and it
 scans it and replies in Persian with a short summary + the full report (.md)
@@ -205,62 +212,44 @@ def check_disk_space(directory, needed_bytes):
 def build_summary(r):
     """The short Persian summary the bot sends as a chat message.
 
-    First lines first: the tampering verdict, then the (calm, capped)
-    risk with its original/tweak split. No alarmist wording.
+    v6: short and professional — the final verdict first, then the
+    (calm, capped) risk with its original/tweak split, then the four
+    privacy answers in one line each. Permissions, trackers, domains
+    and dylib counts are NOT repeated here: they are on the card and
+    in the full report. No alarmist wording.
     """
     ident = r.get("identity", {})
     risk = r.get("risk", {})
     name = ident.get("display_name") or "برنامه"
     tamp = r.get("tampering") or {}
-    lines = [f"🔍 اسکن {name} تمام شد"]
-    if tamp.get("tampered"):
-        lines.append(f"🛠 دستکاری شخص ثالث: بله — {tamp.get('injected_dylib_count', 0)} "
-                     "dylib تزریقی (MobileSubstrate)")
-    else:
-        lines.append("🛠 دستکاری شخص ثالث: پیدا نشد")
-    lines.append(f"📦 {ident.get('bundle_id') or '—'} — نسخه {ident.get('version') or '—'} (حداقل iOS {ident.get('minimum_os') or '—'})")
+    answers = {a["id"]: a for a in (r.get("privacy_answers", []) or [])}
+    verdict_a = answers.get("verdict", {}) or {}
+    mark = "✅" if verdict_a.get("verdict") == "ok" else "⚠️"
+    lines = [f"{mark} اسکن {name} تمام شد — {verdict_a.get('answer_fa', '')}"]
     lines.append(f"📊 ریسک: {risk.get('score', '?')}/100 — {risk.get('level_fa', '')} "
                  f"(برنامه‌ی اصلی: {risk.get('original_points', '?')}، توئیک: {risk.get('tweak_points', '?')})")
+    if tamp.get("tampered"):
+        lines.append(f"🛠 دستکاری شخص ثالث: تأیید شد — {tamp.get('injected_dylib_count', 0)} "
+                     "dylib تزریقی (MobileSubstrate)")
+        if tamp.get("unknown_tweak_servers"):
+            lines.append("⚠️ سرور ناشناخته‌ی توئیک: "
+                         + "، ".join(tamp["unknown_tweak_servers"]))
+    else:
+        lines.append("🛠 دستکاری شخص ثالث: پیدا نشد")
     if r.get("binary", {}).get("encrypted") is True:
         lines.append("🔒 باینری رمزگذاری‌شده (FairPlay) است — تحلیل رشته‌های باینری انجام نشد.")
-    perms = r.get("permissions", [])
-    lines.append(f"🔑 دسترسی‌ها ({len(perms)}): " +
-                 (", ".join(p["label_fa"] for p in perms[:6]) or "هیچ‌کدام") +
-                 ("…" if len(perms) > 6 else ""))
-    trackers = r.get("known_trackers", [])
-    lines.append("📡 ترکرها: " + (", ".join(t["tracker"] for t in trackers[:5]) or "پیدا نشد") +
-                 ("…" if len(trackers) > 5 else ""))
-    http_urls = r.get("insecure_http_urls", [])
-    lines.append(f"🌐 دامنه‌ها: {len(r.get('domains', []))} — لینک ناامن http: {len(http_urls)}")
-    if r.get("dylib_count"):
-        lines.append(f"📚 فایل‌های dylib: {r['dylib_count']} — الگوی مشکوک در dylib: {r.get('dylib_suspicious_count', 0)}")
-    if r.get("deb_count"):
-        lines.append(f"📦 بسته‌های .deb: {r['deb_count']}" +
-                     (f" (توئیک: {len(r.get('tampering', {}).get('tweak_deb_packages', []))})" if r.get("tampering", {}).get("tweak_deb_packages") else ""))
-    if r.get("hardcoded_secrets"):
-        lines.append(f"🔑 رمز سخت‌کدشده: {len(r['hardcoded_secrets'])} مورد")
-    answers = {a["id"]: a for a in (r.get("privacy_answers", []) or [])}
     if answers:
         lines.append("")
         lines.append("🔐 حریم خصوصی:")
         for qid, label in (("tampering", "دستکاری شخص ثالث"),
                             ("sends_photos_to_server", "ارسال عکس به سرور"),
                             ("third_party_can_see_photos", "دسترسی شخص ثالث به عکس"),
-                            ("collects_photo_info", "جمع‌آوری اطلاعات عکس"),
-                            ("verdict", "حکم نهایی")):
+                            ("collects_photo_info", "جمع‌آوری اطلاعات عکس")):
             a = answers.get(qid)
             if a:
                 lines.append(f"• {label}: {a['answer_fa']}")
-    pm = r.get("privacy_manifest")
-    if pm and not pm.get("error"):
-        lines.append(f"🛡 مانیفست حریم خصوصی: ردیابی={'بله' if pm.get('tracking') else 'خیر'}"
-                     + (f"، دامنه ردیابی: {len(pm.get('tracking_domains', []))}" if pm.get("tracking_domains") else ""))
-    top = [b["reason"] for b in risk.get("breakdown", []) if b.get("points", 0) >= 8][:4]
-    if top:
-        lines.append("📌 مهم‌ترین دلایل ریسک:")
-        for t in top:
-            lines.append(f"• {t}")
-    lines.append("📄 گزارش کامل و فایل JSON ضمیمه شد. فایل IPA دانلودشده حذف شد.")
+    lines.append("")
+    lines.append("📄 گزارش کامل، کارت تصویری و JSON ضمیمه شد. فایل IPA حذف شد.")
     return "\n".join(lines)
 
 
@@ -269,18 +258,19 @@ HELP_FA = (
     "یک فایل .ipa برام بفرست، یا لینک مستقیم دانلود یک فایل .ipa بده، تا امنیت و "
     "حریم خصوصی‌ش رو بررسی کنم و گزارش بدم.\n\n"
     "چی بررسی می‌شه:\n"
+    "• دستکاری شخص ثالث (توئیک): آیا غیر از شرکت اصلی، کسی چیزی به برنامه اضافه کرده؟\n"
     "• دسترسی‌ها (دوربین، میکروفون، لوکیشن، مخاطبین، ردیابی…)\n"
     "• مانیفست حریم خصوصی (PrivacyInfo.xcprivacy)\n"
     "• ترکرها و SDKها (Firebase، AppsFlyer و…)\n"
     "• لینک‌های ناامن http و تنظیمات ATS\n"
-    "• باینری: رمزگذاری FairPlay، کتابخانه‌های لینک‌شده، الگوهای مشکوک\n\n"
+    "• باینری: رمزگذاری FairPlay، کتابخانه‌های لینک‌شده، dylibها و بسته‌های .deb\n\n"
     "📦 حداکثر حجم فایل: ۲ گیگابایت (دانلود با MTProto، مثل لینک‌یار).\n"
-    "🔗 یا لینک مستقیم یک فایل .ipa بده تا دانلود و اسکنش کنم.\n"
-    "🖼 بعد از اسکن، یک کارت تصویری خلاصه هم می‌فرستم.\n"
+    "🖼 بعد از اسکن، یک کارت تصویری خلاصه، گزارش کامل و فایل JSON می‌فرستم.\n"
     "🗑 فایل IPA بعد از اسکن و ارسال گزارش حذف می‌شود؛ چیزی ذخیره نمی‌شود.\n"
     "⏳ در طول اسکن یک پیام پیشرفت با ۶ مرحله می‌بینی: دانلود، استخراج، "
     "اسکن باینری، آنالیز dylib و deb، ساخت گزارش، ارسال و پاک کردن.\n"
-    "🔒 IPAهای اپ‌استور رمزگذاری‌شده‌اند؛ تحلیل کامل باینری‌شان بدون نسخه‌ی رمزگشایی‌شده ممکن نیست.\n\n"
+    "🔒 IPAهای اپ‌استور رمزگذاری‌شده‌اند؛ تحلیل کامل باینری‌شان بدون نسخه‌ی رمزگشایی‌شده ممکن نیست.\n"
+    "🔐 فقط صاحب ربات می‌تواند از آن استفاده کند.\n\n"
     "دستورها: /start و /help"
 )
 
@@ -326,6 +316,21 @@ async def finish_progress(prog_msg):
         return
     try:
         await prog_msg.edit("✅ اسکن تمام شد — گزارش ارسال شد و فایل IPA حذف شد.")
+    except Exception:
+        pass
+
+
+async def fail_progress(prog_msg, text):
+    """Turn the progress message into a clear failure message.
+
+    v6: a failed scan must not leave the progress message stuck on a
+    stage, and must not show a raw English exception to the user —
+    the technical detail goes to the server log instead.
+    """
+    if prog_msg is None:
+        return
+    try:
+        await prog_msg.edit(f"❌ {text}")
     except Exception:
         pass
 
@@ -512,6 +517,7 @@ class ScannerBot:
                 tmpdir = Path(tmp)
                 disk_err = check_disk_space(tmpdir, file_size or 0)
                 if disk_err:
+                    await fail_progress(prog_msg, disk_err)
                     await self.reply(event, disk_err)
                     return
                 ipa_path = tmpdir / file_name
@@ -519,19 +525,24 @@ class ScannerBot:
                     await self.client.download_media(
                         event.message, file=str(ipa_path),
                         progress_callback=(tracker.update if tracker else None))
-                except Exception as e:
-                    await self.reply(event, f"دانلود فایل از تلگرام ناموفق بود: {e}")
+                except Exception:
+                    traceback.print_exc()
+                    await fail_progress(prog_msg, "دانلود فایل کامل نشد. لطفاً دوباره بفرست.")
+                    await self.reply(event, "دانلود فایل از تلگرام کامل نشد. لطفاً دوباره بفرست.")
                     return
                 if tracker:
                     tracker.finish()
                 if not ipa_path.exists() or ipa_path.stat().st_size == 0:
+                    await fail_progress(prog_msg, "دانلود فایل کامل نشد. دوباره بفرست.")
                     await self.reply(event, "دانلود فایل کامل نشد. دوباره بفرست.")
                     return
                 err = check_size_limit(ipa_path.stat().st_size)
                 if err:
+                    await fail_progress(prog_msg, err)
                     await self.reply(event, err)
                     return
                 if not check_ipa_magic(ipa_path):
+                    await fail_progress(prog_msg, "فایل دانلودشده یک IPA معتبر نیست.")
                     await self.reply(event, "فایل دانلودشده یک IPA معتبر نیست.")
                     return
                 await set_stage(prog_msg, 2, "استخراج فایل IPA")
@@ -559,18 +570,23 @@ class ScannerBot:
                     await loop.run_in_executor(
                         None, download_url_to, url, ipa_path, tracker)
                 except OversizeError as e:
+                    await fail_progress(prog_msg, str(e))
                     await self.reply(event, str(e))
                     return
                 except NotAnIPAError as e:
+                    await fail_progress(prog_msg, str(e))
                     await self.reply(event, str(e))
                     return
-                except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
-                    await self.reply(event, f"دانلود لینک ناموفق بود: {e}")
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+                    traceback.print_exc()
+                    await fail_progress(prog_msg, "دانلود لینک ناموفق بود. لینک را بررسی کن و دوباره بفرست.")
+                    await self.reply(event, "دانلود لینک ناموفق بود. لینک را بررسی کن و دوباره بفرست.")
                     return
                 finally:
                     tracker.finish()
                 disk_err = check_disk_space(tmpdir, ipa_path.stat().st_size if ipa_path.exists() else 0)
                 if disk_err:
+                    await fail_progress(prog_msg, disk_err)
                     await self.reply(event, disk_err)
                     return
                 await set_stage(prog_msg, 2, "استخراج فایل IPA")
@@ -592,8 +608,10 @@ class ScannerBot:
         try:
             result = await loop.run_in_executor(
                 None, scan_ipa, ipa_path, tmpdir / "work")
-        except Exception as e:
-            await self.reply(event, f"اسکن ناموفق بود: {e}")
+        except Exception:
+            traceback.print_exc()
+            await fail_progress(prog_msg, "اسکن ناموفق بود. لطفاً دوباره امتحان کن.")
+            await self.reply(event, "اسکن ناموفق بود. لطفاً دوباره امتحان کن.")
             return
         await set_stage(prog_msg, 4,
                         f"{result.get('dylib_count', 0)} dylib و "
@@ -617,6 +635,7 @@ class ScannerBot:
             print(f"report card skipped: {e}", file=sys.stderr)
             card_path = None
         await set_stage(prog_msg, 6)
+        sent_ok = False
         try:
             await event.reply(build_summary(result))
             if card_path is not None and card_path.is_file():
@@ -629,15 +648,21 @@ class ScannerBot:
             await self.client.send_file(event.chat_id, str(json_path),
                                         caption="داده‌ی کامل اسکن (JSON)",
                                         force_document=True)
-        except Exception as e:
-            await self.reply(event, f"ارسال گزارش ناموفق بود: {e}")
+            sent_ok = True
+        except Exception:
+            traceback.print_exc()
+            await fail_progress(prog_msg, "ارسال گزارش ناموفق بود. لطفاً دوباره امتحان کن.")
+            await self.reply(event, "ارسال گزارش ناموفق بود. لطفاً دوباره امتحان کن.")
         finally:
             # Reports are temp outputs too: remove them as soon as they are sent.
             md_path.unlink(missing_ok=True)
             json_path.unlink(missing_ok=True)
             if card_path is not None:
                 card_path.unlink(missing_ok=True)
-        await finish_progress(prog_msg)
+        # v6: only mark the progress message finished when the reports
+        # actually went out — a failed send must not say "تمام شد".
+        if sent_ok:
+            await finish_progress(prog_msg)
 
 
 # ---------------------------------------------------------------- CLI

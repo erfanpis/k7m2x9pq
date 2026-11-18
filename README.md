@@ -1,4 +1,4 @@
-# اسکنر IPA + ربات تلگرام — سیب‌استار (نسخه ۴)
+# اسکنر IPA + ربات تلگرام — سیب‌استار (نسخه ۶)
 
 [English summary below](#english-summary)
 
@@ -7,8 +7,45 @@
 اسکن می‌کند و به فارسی گزارش می‌دهد: خلاصه کوتاه در چت + **کارت تصویری خلاصه (PNG)**
 + گزارش کامل (`.md`) و داده (`‌.json`) به‌صورت فایل ضمیمه.
 
-**نسخه ۴ با MTProto کار می‌کند (Telethon، مثل لینک‌یار) و فایل تا ۲ گیگابایت را
+**نسخه ۶ با MTProto کار می‌کند (Telethon، مثل لینک‌یار) و فایل تا ۲ گیگابایت را
 می‌گیرد** — نسخه ۲ با Bot API فقط تا ۲۰ مگابایت می‌گرفت.
+
+## نسخه ۶ — چه چیزی نسبت به نسخه ۵ بهتر شد؟
+
+نسخه ۵ روی همان IPA واقعی (PDF Hero، نسخه‌ی مادشده) هنوز چند ایراد داشت:
+برنامه‌ی سالم هم امتیاز می‌گرفت، جواب‌های حریم خصوصی طولانی و پر از اصطلاح
+بودند، گزارش با هش و جزئیات شروع می‌شد، کارت برنامه‌ی سالم نیمه‌خالی بود،
+و خلاصه‌ی چت ربات ۲۰ خط پر از عدد بود. نسخه ۶ این‌ها را اصلاح می‌کند:
+
+| بخش | نسخه ۵ | نسخه ۶ |
+|---|---|---|
+| کالیبراسیون (برنامه‌ی سالم) | برنامه‌ی تمیز هم امتیاز می‌گرفت (ترکر ۵ امتیاز، خط‌های مانیفست یک حقیقت را سه بار حساب می‌کردند، ATS ده امتیاز) | ✅ **CleanNotes: ۵/۱۰۰، FreeGame (بازی رایگان با تبلیغات): ۲۵/۱۰۰ — هر دو «کم»** — ترکر ۲ امتیاز (سقف ۶)، ردیابی مانیفست ۳، دامنه‌های ردیابی ۲، نوع‌های ردیابی ۳، نوع‌های لینک‌شده ۲، ATS شش امتیاز، سقف کد ۱۵ و رمز سخت‌کدشده اول امتیاز می‌گیرد تا هیچ‌وقت زیر سقف گم نشود. حداکثر ممکن حالا ۹۰ است |
+| یافته‌های سقف‌خورده | وقتی سقف یک دسته پر می‌شد، یافته‌ی بعدی بی‌صدا از تفکیک ریسک حذف می‌شد (مثلاً خط ترکرها در FreeGame) | ✅ **یک خط خلاصه به‌ازای هر دسته** در تفکیک ریسک: «سقف دسته‌ی X پر شد — امتیازی اضافه نشد» + فهرست یافته‌ها؛ هیچ چیز بی‌صدا پنهان نمی‌شود |
+| پاسخ‌های حریم خصوصی | هر جواب چند خط با اصطلاح‌های فنی (`NSPrivacyCollectedDataType…`) و هشدارهای تکراری | ✅ **دقیقاً ۳ خط کوتاه به فارسی ساده: جواب + دلیل + محدودیت** — بدون ثابت‌های مانیفست در متن جواب، بدون هشدار تکراری |
+| ساختار گزارش | گزارش با هش فایل و جزئیات شروع می‌شد؛ پاسخ‌ها خیلی پایین بودند؛ بخش «یافته‌ها» همان تفکیک ریسک را دوباره می‌گفت؛ بخش جیلبریک همان مدرک دستکاری را تکرار می‌کرد | ✅ **صفحه‌ی اول: حکم نهایی، ریسک با تفکیک، دستکاری، پاسخ‌ها، «چرا این امتیاز؟»** — بعد خط جداکننده و «جزئیات» (مشخصات فایل، deb، روش‌شناسی، …). فقط ۵ یافته‌ی مهم در گزارش می‌ماند (لیست کامل در JSON) و بخش جیلبریک حذف شد (یک خط خلاصه در بخش دستکاری) |
+| کارت PNG | ارتفاع ثابت (1320) — کارت برنامه‌ی سالم نیمه‌خالی بود؛ سرور ناشناخته‌ی توئیک نشان داده نمی‌شد؛ حکم نهایی دو بار تکرار می‌شد؛ عنوان یافته‌ی بلند وسط کلمه بریده می‌شد («اس…») | ✅ **ارتفاع با محتوا تنظیم می‌شود** (کارت سالم کوتاه‌تر از کارت دستکاری‌شده)؛ **سرور ناشناخته‌ی توئیک زیر بنر**؛ حکم نهایی فقط یک بار؛ عنوان یافته در مرز کلمه کوتاه می‌شود |
+| خلاصه‌ی چت ربات | حدود ۲۰ خط: دسترسی‌ها، ترکرها، دامنه‌ها، dylibها، `.deb`، رمزها، مانیفست، مهم‌ترین دلایل | ✅ **کوتاه و حرفه‌ای: حکم نهایی اول، ریسک با تفکیک، دستکاری، چهار پاسخ در یک خط** — عددها روی کارت و در گزارش کامل‌اند |
+| پیام‌های خطا | خطای انگلیسی خام (`...: {e}`) به کاربر نشان داده می‌شد و پیام پیشرفت روی یک مرحله گیر می‌کرد | ✅ **پیام خطا به فارسی ساده** (جزئیات فنی فقط در لاگ سرور)؛ پیام پیشرفت به ❌ واضح تبدیل می‌شود و «✅ تمام شد» فقط وقتی زده می‌شود که گزارش واقعاً ارسال شده باشد |
+| امتیاز تست | ۸۵/۱۰۰ (اصلی ۶۰، توئیک ۲۵) | ✅ **۸۶/۱۰۰ (اصلی ۶۱، توئیک ۲۵)** — اختلاف فقط کالیبراسیون دوباره است؛ سقف ۹۰ همان است |
+
+## نسخه ۵ — چه چیزی نسبت به نسخه ۴ بهتر شد؟
+
+نسخه ۴ روی همان IPA واقعی (PDF Hero، نسخه‌ی مادشده، ریسک ۷۷/۱۰۰) تست شد و
+باز هم برای هیچ ترسناک بود. مشکل این بود که «توانایی» با «واقعیت» اشتباه
+گرفته شده بود: دسترسی به عکس + حرف زدن با چند سرور آنالیتیکس، «بله، عکس‌ها
+به سرور می‌روند» گزارش شده بود — در حالی که هیچ‌کدام از آن سرورها (adjust،
+Firebase logging، Lokalise، Firebase Realtime Database) سرور آپلود عکس
+نیستند. نسخه ۵ این را اصلاح می‌کند:
+
+| بخش | نسخه ۴ | نسخه ۵ |
+|---|---|---|
+| پاسخ‌های حریم خصوصی | «بله» بر اساس توانایی (دسترسی به عکس + سرور آنالیتیکس = ارسال عکس) | ✅ **حکم سه‌سطحه‌ی مدرک‌محور: «تأیید شد» / «شواهدی نیست» / «فقط توانایی دارد، اثبات نشده»** — هیچ‌وقت بر اساس توانایی به‌تنهایی «بله» گفته نمی‌شود. برای PDF Hero: ارسال عکس «شواهدی نیست»، دیدن عکس توسط توئیک «فقط توانایی دارد» (همان پروسس، دسترسی به keychain/ران‌تایم) و سرور ناشناخته‌ی توئیک پیدا نشد، پس اثبات نشده است. محدودیت تحلیل ایستا یک بار گفته می‌شود، نه در هر سؤال |
+| APIهای معمولی iOS | ASIdentifierManager، PhotoKit، Speech «مشکوک» شمرده می‌شدند (+۵ هر کدام) | ✅ **۰ امتیاز، با برچسب «معمولی»** — این APIها در هزاران برنامه‌ی سالم استفاده می‌شوند و دیگر تهدید نیستند. دسترسی‌های موقعیت/مخاطبین/دوربین/میکروفون هم وقتی توضیح استفاده «تبلیغات» می‌گوید و مدرک خروج داده نیست، حداکثر ۱ امتیاز می‌گیرند و به زبان ساده توضیح داده می‌شوند |
+| شمارش دوباره | dylibهای تزریقی یک بار در «+۸ دستکاری» و دوباره تک‌تک در یافته‌ها شمرده می‌شدند | ✅ **هر یافته دقیقاً یک بار** — امتیاز الگوهای dylib تزریقی داخل همان یک خط «دستکاری شخص ثالث» جذب می‌شود (با سقف ۲۵ توئیک)؛ مجموع خط‌های تفکیک ریسک دقیقاً برابر امتیاز کل است و تست هم همین را چک می‌کند |
+| محافظت‌های باینری | «Stack Canary: پیدا نشد / ARC: پیدا نشد» — اشتباه، چون در iOS این‌ها پیش‌فرض بیلد انتشار فعال‌اند و با جستجوی رشته‌ها نمی‌شود نبودشان را گفت | ✅ تشخیص درست از **جدول نمادها (LC_SYMTAB)** — اگر نماد `___stack_chk_guard` / `objc_storeStrong` باشد، «بله»؛ اگر باینری جدول نماد ندارد، **«نامشخص» و بدون امتیاز**؛ هرگز «پیدا نشد» و هرگز جریمه نمی‌شود |
+| تکرار بخش‌ها | بخش «دستکاری شخص ثالث» دو بار کپی شده بود (یک بار بخش جدا، یک بار داخل پاسخ‌ها) | ✅ هر بخش **یک بار**؛ پاسخ حریم خصوصی برای دستکاری فقط ۲ خط خلاصه + ارجاع به بخش کامل است |
+| کارت PNG | حکم‌ها با «بله» ترسناک نشان داده می‌شدند | ✅ بازطراحی: **حکم‌های مدرک‌محور** («تأیید شد» / «شواهدی نیست» / «فقط توانایی دارد»)، بنر دستکاری با «تأیید شد» به‌جای «بله»، تفکیک ریسک اصلی/توئیک؛ رندر دوباره با چشم بررسی شد (کارت پرریسک و کارت تمیز) |
+| امتیاز تست | ۸۷/۱۰۰ (اصلی ۶۲، توئیک ۲۵) | ✅ **۸۵/۱۰۰ (اصلی ۶۰، توئیک ۲۵)** — اختلاف فقط حذف امتیاز APIهای معمولی است؛ سقف ۸۷ همان است |
 
 ## نسخه ۴ — چه چیزی نسبت به نسخه ۳ بهتر شد؟
 
@@ -36,7 +73,7 @@
 
 ### روش‌شناسی و استانداردها
 
-اسکن ایستا نسخه ۴ از روش‌های استاندارد حرفه‌ای یاد گرفته است (فقط روش‌ها را
+اسکن ایستا نسخه ۶ از روش‌های استاندارد حرفه‌ای یاد گرفته است (فقط روش‌ها را
 یاد گرفته‌ایم، متن کپی نشده است):
 
 - **MobSF (Mobile Security Framework)** — اسکن باینری iOS: دسترسی‌ها، گواهی
@@ -144,7 +181,7 @@ python3 scanner.py app.ipa --json report.json --report report.md
 # ۲) کارت تصویری خلاصه
 python3 report_card.py app.ipa --out card.png
 
-# ۳) ربات تلگرام — نسخه ۴ به Telethon نیاز دارد (MTProto، برای ۲ گیگابایت)
+# ۳) ربات تلگرام — نسخه ۶ به Telethon نیاز دارد (MTProto، برای ۲ گیگابایت)
 pip install -r requirements.txt
 export TELEGRAM_BOT_TOKEN='توکن-از-BotFather'
 export TELEGRAM_API_ID='123456'        # از https://my.telegram.org
@@ -171,18 +208,23 @@ python3 test/test_scanner_v3.py
 ## ساختار ریپو
 
 ```
-scanner.py                  # اسکنر عمیق نسخه ۴ (فقط stdlib)
-bot.py                      # ربات تلگرام نسخه ۴ (Telethon / MTProto)
+scanner.py                  # اسکنر عمیق نسخه ۶ (فقط stdlib)
+bot.py                      # ربات تلگرام نسخه ۶ (Telethon / MTProto)
 report_card.py              # کارت تصویری خلاصه PNG (Pillow)
 requirements.txt            # telethon, Pillow, arabic-reshaper, python-bidi
 test/
   make_test_ipa_v2.py       # ساخت IPA مصنوعی تست (با ۳ فایل dylib: سالم، رمزگذاری‌شده، توئیک MobileSubstrate + یک .deb توئیک + appex + Flutter)
-  test_bot_offline.py       # تست آفلاین ربات نسخه ۴ (بدون توکن، بدون شبکه)
-  test_scanner_v3.py        # تست اسکنر نسخه ۴ + کارت PNG
+  make_clean_ipa.py        # ساخت دو IPA سالم برای کالیبراسیون: CleanNotes (ساده) و FreeGame (بازی رایگان با تبلیغات)
+  test_bot_offline.py       # تست آفلاین ربات نسخه ۶ (بدون توکن، بدون شبکه)
+  test_scanner_v3.py        # تست اسکنر نسخه ۶ + کارت PNG
   TestGame.ipa              # IPA تست (رمزگذاری‌نشده)
   TestGame-encrypted.ipa    # همان IPA با cryptid=1
+  CleanNotes.ipa            # IPA سالم (دوربین+گالری+Face ID، یک ترکر Firebase)
+  FreeGame.ipa              # IPA سالم با تبلیغات (دسترسی‌های تبلیغاتی، مانیفست ردیابی، ۳ ترکر، ۱ http)
   report-v2.json / .md       # خروجی تست
   report-v2-encrypted.json / .md
+  report-clean.json / .md   # خروجی CleanNotes
+  report-freegame.json / .md # خروجی FreeGame
 scanner_v1_reference.py     # کپی نسخه ۱ برای مرجع (دست نخورده)
 README.md / DEPLOY.md / LICENSE / .gitignore
 ```
@@ -192,15 +234,15 @@ README.md / DEPLOY.md / LICENSE / .gitignore
 IPA مصنوعی تست (نه برنامه‌ی واقعی اپ‌استور) با `test/make_test_ipa_v2.py` ساخته و اسکن شد:
 
 - برنامه: TestGame — `com.example.testgame`، نسخه 1.2.3، حداقل iOS 15.0 (از باینری: 16.0.0)، SDK iphoneos17.5، Xcode 15.4
-- **ریسک: 87/100 — بالا** (برنامه‌ی اصلی: ۶۲، توئیک: ۲۵ — حداکثر ممکن با سقف‌های نسخه ۴، ۸۷ است؛ دیگر ۱۰۰/۱۰۰ الکی نمی‌شود)
+- **ریسک: 86/100 — بالا** (برنامه‌ی اصلی: ۶۱، توئیک: ۲۵ — حداکثر ممکن با سقف‌های نسخه ۶، ۹۰ است؛ دیگر ۱۰۰/۱۰۰ الکی نمی‌شود)
 - دسترسی‌ها (۱۱): دوربین، میکروفون، موقعیت همیشه، مخاطبین، گالری، بلوتوث، سلامت، تشخیص گفتار، Face ID، شبکه محلی، ردیابی ATT
 - مانیفست حریم خصوصی: ردیابی = بله، ۲ دامنه‌ی ردیابی، ۳ نوع داده (موقعیت دقیق حساس علامت خورد)
 - ترکرها (۷): Firebase، AppsFlyer، Amplitude، Flurry، Mixpanel، Sentry، Segment
-- باینری: Mach-O ۶۴ بیتی arm64، رمزگذاری‌نشده، PIE/stack canary/ARC فعال، UUID و ۲ کتابخانه‌ی لینک‌شده، ۸ الگوی مشکوک (IDFA، لوکیشن، مخاطبین، کلیپ‌بورد، `dlopen` و…)، ۲ رمز سخت‌کدشده (فقط نوع‌شان گزارش می‌شود، نه مقدار)، MD5 ضعیف
-- فایل‌های dylib (۳): `libTest.dylib` — ۳ الگوی مشکوک، ریسک ۱۸؛ `libLocked.dylib` — رمزگذاری‌شده، تحلیل رشته‌ها در دسترس نیست؛ `libTweak.dylib` — **تزریقی (MobileSubstrate)** با سرور ناشناخته‌ی خودش `tweak-evil.example.com`
+- باینری: Mach-O ۶۴ بیتی arm64، رمزگذاری‌نشده، PIE/stack canary/ARC فعال (از جدول نمادها)، UUID و ۲ کتابخانه‌ی لینک‌شده، ۲ الگوی مشکوک در باینری اصلی (`dlopen` و…) — APIهای معمولی مثل ASIdentifierManager، IDFA/IDFV، PhotoKit و Speech امتیاز ۰ می‌گیرند و فقط «معمولی» لیست می‌شوند — ۲ رمز سخت‌کدشده (فقط نوع‌شان گزارش می‌شود، نه مقدار)، MD5 ضعیف
+- فایل‌های dylib (۳): `libTest.dylib` — ۲ الگوی مشکوک، ریسک ۱۲؛ `libLocked.dylib` — رمزگذاری‌شده، تحلیل رشته‌ها در دسترس نیست؛ `libTweak.dylib` — **تزریقی (MobileSubstrate)** با سرور ناشناخته‌ی خودش `tweak-evil.example.com`
 - بسته‌ی `.deb` (۱): `com.example.testtweak` نسخه ۱٫۰ — بسته‌ی توئیک با فایل‌های MobileSubstrate و اسکریپت postinst
 - دامنه‌ها: ۷ — URL ناامن `http://`: ۳ (شامل یکی از dylib)؛ ۹ دامنه‌ی فضای نام/مستندات (w3.org، ns.adobe.com، github.com، t.me و…) نادیده گرفته شدند و هیچ امتیازی ندادند
-- پاسخ‌ها: دستکاری شخص ثالث «بله — تأیید شد»، ارسال عکس به سرور «بله»، دسترسی شخص ثالث «بله — توئیک به سرور ناشناخته‌ی خودش وصل می‌شود»، جمع‌آوری اطلاعات عکس «احتمالاً»، حکم نهایی «بالا — دستکاری شخص ثالث تأیید شد؛ با احتیاط استفاده کنید»
+- پاسخ‌ها: دستکاری شخص ثالث «تأیید شد»، ارسال عکس به سرور «شواهدی نیست»، دسترسی شخص ثالث به عکس «فقط توانایی دارد، اثبات نشده»، جمع‌آوری اطلاعات عکس «فقط توانایی دارد»، حکم نهایی «بالا — دستکاری شخص ثالث تأیید شد؛ با احتیاط استفاده کنید»
 - خانواده‌ی ران‌تایم: Flutter؛ افزونه: TestWidget.appex با دسترسی دوربین
 
 نسخه‌ی رمزگذاری‌شده هم تست شد: اسکنر درست تشخیص داد `encrypted=True, cryptid=1`،
@@ -210,10 +252,31 @@ IPA مصنوعی تست (نه برنامه‌ی واقعی اپ‌استور) ب
 
 ربات هم آفلاین تست شد: `/start` راهنمای فارسی را می‌دهد، فایل غیر IPA رد می‌شود،
 فایل بالای ۲ گیگابایت با پیام حد تلگرام رد می‌شود، لینک غیر http(s) و لینک غیر IPA
-رد می‌شود، دانلود لینک از سرور محلی کار می‌کند، و خلاصه‌ی فارسی همان ریسک 87/100
-را با حکم دستکاری در خط اول، پنج پاسخ حریم خصوصی و تعداد dylib و `.deb` برمی‌گرداند.
-یک پیام پیشرفت در ۶ مرحله ویرایش می‌شود و در پایان «اسکن تمام شد» می‌نویسد. کارت PNG
-هم برای هر دو نسخه‌ی IPA ساخته و اعتبارسنجی شد (1200×1320) و رندرش با چشم بررسی شد.
+رد می‌شود، دانلود لینک از سرور محلی کار می‌کند، و خلاصه‌ی فارسی کوتاه همان ریسک 86/100
+را با حکم نهایی در خط اول، چهار پاسخ حریم خصوصی در یک خط و سرور ناشناخته‌ی توئیک
+برمی‌گرداند (بدون لیست دسترسی/ترکر/دامنه — آن‌ها روی کارت و در گزارش کامل‌اند).
+یک پیام پیشرفت در ۶ مرحله ویرایش می‌شود و در پایان «اسکن تمام شد» می‌نویسد؛ اگر
+اسکن یا ارسال ناموفق شود، همان پیام به یک ❌ واضح تبدیل می‌شود، نه اینکه روی یک
+مرحله گیر کند. کارت PNG هم برای هر سه IPA ساخته و اعتبارسنجی شد و رندرش با چشم
+بررسی شد (کارت برنامه‌ی دستکاری‌شده بلندتر از کارت برنامه‌ی سالم است، چون ارتفاع
+کارت با محتوا تنظیم می‌شود).
+
+## کالیبراسیون — برنامه‌ی سالم نباید ترسناک باشد
+
+یک اسکنر حرفه‌ای باید برنامه‌ی سالم را سالم نشان بدهد. دو IPA سالم برای همین
+ساخته شد (`test/make_clean_ipa.py`):
+
+- **CleanNotes — ریسک 5/100، کم:** یادداشت ساده با دوربین، گالری و Face ID و
+  فقط یک ترکر Firebase. هیچ دستکاری، هیچ http، هیچ dylib.
+- **FreeGame — ریسک 25/100، کم:** بازی رایگان واقع‌گرایانه با تبلیغات —
+  دسترسی‌های تبلیغاتی، مانیفست ردیابی، ۳ ترکر (Firebase، AdMob، AppsFlyer)
+  و یک آدرس http تبلیغاتی. با همه‌ی این‌ها هنوز «کم» است، نه «بالا».
+
+چرا؟ ترکرها در نسخه ۶ هر کدام ۲ امتیاز می‌گیرند (نه ۵)، خط‌های مانیفست یک
+حقیقت ردیابی را سه بار حساب نمی‌کنند، ATS شش امتیاز می‌گیرد (نه ده)، و سقف
+دسته‌ی کد ۱۵ است تا رمز سخت‌کدشده هیچ‌وقت به‌خاطر پر شدن سقف دیده نشود.
+یافته‌ای که سقف دسته‌اش پر شده باشد، در تفکیک ریسک در یک خط خلاصه می‌آید،
+نه اینکه بی‌صدا حذف شود.
 
 ## گیت‌هاب
 
@@ -232,29 +295,29 @@ IPA مصنوعی تست (نه برنامه‌ی واقعی اپ‌استور) ب
 
 ## <a name="english-summary"></a>English summary
 
-A Telegram bot + deep IPA scanner for SibStar (Persian iOS App Store), v4.
+A Telegram bot + deep IPA scanner for SibStar (Persian iOS App Store), v6.
 Send an `.ipa` file or a direct `.ipa` link; it replies in Persian with a risk
 score (0–100) summary, a PNG summary card, plus full Markdown/JSON reports.
-v4 uses Telethon (MTProto, like LinkYar) so files up to 2 GB work (v2's Bot API
-limit was 20 MB). v4 scan adds: SDK/build info, plist security (background
+v6 uses Telethon (MTProto, like LinkYar) so files up to 2 GB work (v2's Bot API
+limit was 20 MB). v6 scan adds: SDK/build info, plist security (background
 modes, file sharing, Bonjour), per-data-type privacy-manifest risk, 65+
 tracker SDKs (incl. static libs), 33 suspicious binary patterns, per-domain
 risk, per-entitlement severity, provisioning type/expiry, ATS exception
 details, per-framework details, per-dylib analysis (encrypted dylibs reported
 as unavailable, never silently skipped), per-finding severity, and five
-Picsart-style privacy answers with evidence and honest limits. v4 fixes the
-v3 false positives (XML/XMP/SVG namespace URLs and docs domains are ignored
-and never scored), recalibrates risk with per-category caps (network 20,
-permissions 15, privacy 15, code 12, tweak 25; max possible 87), adds a
-dedicated third-party-tampering verdict (MobileSubstrate dylib detection,
-per-dylib domains, unknown tweak servers), `.deb` tweak-package analysis,
-binary protections (PIE/stack canary/ARC), hardcoded-secret and weak-crypto
-detection (values never stored), runtime-family and app-extension analysis,
-jailbreak-artifact detection, and MASVS mapping with confidence per finding
-(methods learned from MobSF and OWASP MASVS/MASTG). The bot shows one
-numbered 6-stage progress message; the redesigned PNG card (1200×1320) is
-calm and was visually checked. Downloaded IPAs and generated reports live
-only in a temp dir and are deleted right after the scan/report, even on
-failure. FairPlay-encrypted App Store IPAs are detected (`cryptid=1`) and
-the binary-string section is honestly reported as unavailable — no FairPlay
-bypass is claimed or implemented.
+Picsart-style privacy answers with evidence and honest limits. v6 fixes the
+v5 flaws: privacy answers are now exactly 3 short plain-Persian lines each
+(answer + evidence + limit), with no raw manifest constants, and keep the
+3-level evidence verdicts (confirmed / no-evidence / capability) — capability
+alone is never reported as "yes" (a photo permission plus analytics servers
+is not proof photos are sent); the report's
+first screen shows the verdict, risk, tampering and answers, with details
+below, and redundant sections (full findings list, standalone jailbreak
+section) were removed; the PNG card is dynamically sized to its content,
+shows the unknown tweak server, and has no duplicated verdict row; the
+chat summary is short (verdict first, risk, four answers) and errors are
+plain Persian with a clear ❌ progress message instead of a stuck stage;
+calibration: a clean app scores 5/100 and a realistic ad-supported game
+25/100 (trackers 2 points each, manifest lines no longer triple-count
+tracking, ATS 6, code cap 15 with secrets scored first, capped findings
+grouped into one summary line per category instead of silently hidden).

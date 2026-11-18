@@ -1,8 +1,8 @@
-# راهنمای اجرا و استقرار — اسکنر IPA + ربات تلگرام (نسخه ۴)
+# راهنمای اجرا و استقرار — اسکنر IPA + ربات تلگرام (نسخه ۵)
 
 ## ۱) ساخت ربات تلگرام و گرفتن API ID/Hash
 
-ربات نسخه ۴ با MTProto کار می‌کند و به سه چیز نیاز دارد:
+ربات نسخه ۵ با MTProto کار می‌کند و به سه چیز نیاز دارد:
 
 1. **توکن ربات** — در تلگرام به `@BotFather` بروید، `/newbot` بزنید، نام و یوزرنیم
    بدهید و توکن را کپی کنید. توکن را **هرگز** در چت، کد یا فایل نفرستید.
@@ -67,8 +67,8 @@ Branch: main → Run workflow. اولین اجرا را از همان‌جا چ�
 python3 bot.py --check-config                 # تنظیمات کامل است؟ (بدون شبکه)
 python3 bot.py --check-token                  # توکن و اتصال سالم است؟
 python3 bot.py --selftest test/TestGame.ipa   # خلاصه‌ی فارسی بدون تلگرام
-python3 test/test_bot_offline.py              # تست آفلاین ربات نسخه ۴
-python3 test/test_scanner_v3.py               # تست اسکنر نسخه ۴ + کارت PNG
+python3 test/test_bot_offline.py              # تست آفلاین ربات نسخه ۵
+python3 test/test_scanner_v3.py               # تست اسکنر نسخه ۵ + کارت PNG
 python3 scanner.py test/TestGame.ipa --json test/report-v2.json --report test/report-v2.md
 python3 scanner.py test/TestGame-encrypted.ipa --json test/report-v2-encrypted.json --report test/report-v2-encrypted.md
 python3 report_card.py test/TestGame.ipa --out /tmp/card.png
@@ -115,7 +115,7 @@ python3 report_card.py test/TestGame.ipa --out /tmp/card.png
 
 ```bash
 git add scanner.py bot.py report_card.py requirements.txt README.md DEPLOY.md test/
-git commit -m "IPA scanner v4: calm scoring, tampering verdict, .deb, MASVS, redesigned card"
+git commit -m "IPA scanner v6: calibration (clean app 5/100), 3-line plain answers, report first screen, dynamic card, short summary, clear errors"
 git push origin main
 ```
 
