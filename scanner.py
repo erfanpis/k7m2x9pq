@@ -221,14 +221,31 @@ and reported explicitly; that section is marked "unavailable", never faked.
 Usage:
   python3 scanner.py app.ipa [--json out.json] [--report out.md]
 """
-import argparse, hashlib, io, json, plistlib, re, struct, sys, tarfile, tempfile, zipfile
+import argparse, hashlib, io, json, os, plistlib, re, struct, sys, tarfile, tempfile, zipfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import deep_scan  # noqa: E402  (v10 added-part analysis)
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 MAX_IPA_BYTES = 2 * 1024 * 1024 * 1024
-MAX_SCAN_BYTES = 64 * 1024 * 1024
-MAX_FILES = 5000
+MAX_SCAN_BYTES = 64 * 1024 * 1024          # non-binary data files (plist/json/…)
+MAX_BINARY_BYTES = 1536 * 1024 * 1024      # v10: Mach-O binaries are read WHOLE
+MAX_FILES = 50000                          # v10: big apps have tens of thousands of files
+MAX_COMPRESSION_RATIO = 200                # zip-bomb guard (per entry)
+
+
+class ScanLimitError(ValueError):
+    """A safety limit was hit; message_fa is shown to the user as-is."""
+    def __init__(self, message_fa):
+        super().__init__(message_fa)
+        self.message_fa = message_fa
+
+
+def _read_binary(path):
+    """Whole Mach-O (v10: no 64 MB cut), capped only by MAX_BINARY_BYTES."""
+    with open(path, "rb") as f:
+        return f.read(MAX_BINARY_BYTES)
 MIN_STR_LEN = 4
 
 # key -> (Persian label, English label, risk 0-10)
@@ -1437,25 +1454,58 @@ def hashes_of(path):
     return {k: v.hexdigest() for k, v in out.items()}
 
 def safe_extract(ipa_path, dest):
+    """Streaming, bounded extraction (v10).
+
+    * path traversal: every target must resolve INSIDE dest (exact
+      directory-boundary check, not a bare string prefix); absolute
+      names and ".." are dropped; symlink entries are never created.
+    * zip bomb: total declared size <= MAX_IPA_BYTES, per-entry
+      compression ratio <= MAX_COMPRESSION_RATIO, and the bytes actually
+      written are counted (a lying header cannot exceed the cap).
+    * memory: entries are copied in 1 MB chunks, never read whole.
+    """
     dest = Path(dest).resolve()
     dest.mkdir(parents=True, exist_ok=True)
     out = []
-    with zipfile.ZipFile(ipa_path) as z:
-        if sum(i.file_size for i in z.infolist()) > MAX_IPA_BYTES:
-            raise ValueError("IPA too large")
-        for info in z.infolist():
-            if len(out) > MAX_FILES:
-                raise ValueError("Too many files in IPA")
-            target = (dest / info.filename).resolve()
-            if not str(target).startswith(str(dest)):
+    written_total = 0
+    try:
+        z = zipfile.ZipFile(ipa_path)
+    except zipfile.BadZipFile:
+        raise ScanLimitError("فایل IPA خراب است یا فایل ZIP معتبر نیست.")
+    with z:
+        infos = z.infolist()
+        files = [i for i in infos if not i.is_dir()]
+        if len(files) > MAX_FILES:
+            raise ScanLimitError(
+                f"این IPA {len(files):,} فایل دارد؛ سقف امن اسکن {MAX_FILES:,} فایل است.")
+        if sum(i.file_size for i in infos) > MAX_IPA_BYTES:
+            raise ScanLimitError("حجم باز‌شده‌ی این IPA بیشتر از ۲ گیگابایت است.")
+        for info in infos:
+            name = info.filename.replace("\\", "/")
+            if name.startswith("/") or ".." in Path(name).parts or name.startswith("__MACOSX/"):
+                continue
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                continue  # symlink entry — never materialised
+            target = (dest / name).resolve()
+            if target != dest and dest not in target.parents:
                 continue
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with z.open(info) as src, open(target, "wb") as dst:
-                    dst.write(src.read())
-                out.append(str(target.relative_to(dest)))
+                continue
+            if (info.compress_size and info.file_size > 1024 * 1024 and
+                    info.file_size / max(1, info.compress_size) > MAX_COMPRESSION_RATIO):
+                raise ScanLimitError("ساختار این IPA مشکوک است (فشرده‌سازی غیرعادی / zip bomb).")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(info) as src, open(target, "wb") as dst:
+                while True:
+                    chunk = src.read(1 << 20)
+                    if not chunk:
+                        break
+                    written_total += len(chunk)
+                    if written_total > MAX_IPA_BYTES:
+                        raise ScanLimitError("حجم باز‌شده‌ی این IPA بیشتر از ۲ گیگابایت است.")
+                    dst.write(chunk)
+            out.append(str(target.relative_to(dest)))
     return out
 
 def find_app_dir(root):
@@ -1576,7 +1626,7 @@ def parse_macho_deep(exe_path):
     """Parse Mach-O incl. FAT slices. Returns dict with slices + merged view."""
     try:
         size = exe_path.stat().st_size
-        data = exe_path.read_bytes()[:MAX_SCAN_BYTES]
+        data = _read_binary(exe_path)
     except Exception as e:
         return {"is_macho": False, "error": str(e), "size_bytes": 0}
     base = {"size_bytes": size}
@@ -1620,7 +1670,7 @@ def extract_strings(data):
             pass
     return out
 
-def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES,
+def scan_binary_strings(exe_path, max_bytes=MAX_BINARY_BYTES,
                         purpose=None, main_binary=False):
     """Only call when NOT encrypted. Returns URLs/domains + suspicious hits.
 
@@ -1638,7 +1688,8 @@ def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES,
     are scored, because a dylib is not the app doing its own job.
     """
     try:
-        data = exe_path.read_bytes()[:max_bytes]
+        with open(exe_path, "rb") as _f:
+            data = _f.read(max_bytes)
     except Exception as e:
         return {"error": str(e)}
     urls, domains, http_urls, ignored = set(), set(), set(), []
@@ -1702,7 +1753,7 @@ def scan_binary_strings(exe_path, max_bytes=MAX_SCAN_BYTES,
             "ignored_urls": ignored, "suspicious": hits,
             "info_patterns": info_hits, "generic_apis": generic}
 
-def scan_bundle_files(app_dir):
+def scan_bundle_files(app_dir, exclude=()):
     """URLs/domains from all small files inside .app (plists, json, configs).
     Apple DTD host is excluded from the insecure list (v1 false positive).
     v4: only *network* URLs are counted; namespace/docs/invalid strings
@@ -1720,9 +1771,18 @@ def scan_bundle_files(app_dir):
         if p.suffix == ".dylib":
             continue
         try:
-            if p.stat().st_size > MAX_SCAN_BYTES:
+            _rel = str(p.relative_to(app_dir))
+        except ValueError:
+            continue
+        if _rel in exclude:
+            continue  # v10: an added part's servers are never "original"
+        try:
+            if deep_scan.is_macho_file(p):
+                data = _read_binary(p)
+            elif p.stat().st_size > MAX_SCAN_BYTES:
                 continue
-            data = p.read_bytes()
+            else:
+                data = p.read_bytes()
         except Exception:
             continue
         for u, in_noise in _iter_urls(data):
@@ -1868,7 +1928,7 @@ def extract_macho_symbol_names(exe_path, macho):
     builds, so absence of a symbol table proves nothing."""
     names, has_symtab = set(), False
     try:
-        data = Path(exe_path).read_bytes()[:MAX_SCAN_BYTES]
+        data = _read_binary(exe_path)
     except Exception:
         return names, has_symtab
     slices = macho.get("slices") or [macho]
@@ -2376,7 +2436,7 @@ def scan_ipa(ipa_path, workdir):
         "file": str(ipa_path),
         **hashes_of(ipa_path),
         "size_bytes": ipa_path.stat().st_size,
-        "scanner": "sibstar-ipa-scanner 9.1 (stdlib only)",
+        "scanner": "sibstar-ipa-scanner 10.0 (stdlib only)",
         "limits": [
             "IPAهای اپ‌استور با FairPlay رمزگذاری شده‌اند؛ تحلیل رشته‌ها و الگوهای باینری بدون نسخه‌ی رمزگشایی‌شده ممکن نیست.",
             "این اسکن بدون رمزگشایی، Info.plist، مانیفست حریم خصوصی، فریم‌ورک‌ها، entitlements، ATS و URLها را می‌خواند.",
@@ -2584,7 +2644,7 @@ def scan_ipa(ipa_path, workdir):
     _main_strings = []
     if bin_strings and not bin_strings.get("unavailable") and exe_path and exe_path.is_file():
         try:
-            _main_strings = extract_strings(exe_path.read_bytes()[:MAX_SCAN_BYTES])
+            _main_strings = extract_strings(_read_binary(exe_path))
         except Exception:
             _main_strings = []
     # Symbol-table based protections (v5): only on a decrypted binary;
@@ -2649,7 +2709,7 @@ def scan_ipa(ipa_path, workdir):
             _dp = app_dir / _d["path"]
             if _dp.is_file():
                 _jb_dylib_sources[f"dylib {_d['name']}"] = extract_strings(
-                    _dp.read_bytes()[:MAX_SCAN_BYTES])
+                    _read_binary(_dp))
         except Exception:
             pass
     if _jb_dylib_sources:
@@ -2671,7 +2731,15 @@ def scan_ipa(ipa_path, workdir):
     # URLs / domains: bundle files + (decrypted) binary strings, merged.
     # v4: only real network URLs count; namespace/docs strings are kept
     # separately in result["ignored_urls"] and never add risk.
-    urls, domains, http_urls, ignored = scan_bundle_files(app_dir)
+    # v10: decide WHAT WAS ADDED from the load commands first, so the
+    # added parts' files never leak into the "original app" servers.
+    _added_parts, _loads, _added_extra = deep_scan.detect_added_parts(
+        app_dir, exe_path if (exe_path and exe_path.is_file()) else None)
+    _added_paths = {p["path"] for p in _added_parts}
+    _exclude = set(_added_paths)
+    if exe_path and exe_path.is_file():
+        _exclude.add(str(exe_path.relative_to(app_dir)))  # scanned separately
+    urls, domains, http_urls, ignored = scan_bundle_files(app_dir, exclude=_exclude)
     ignored_urls = list(ignored)
     # Original app's own network domains (bundle + main binary only,
     # excluding dylibs) — used to judge whether a tweak dylib talks to
@@ -2685,6 +2753,9 @@ def scan_ipa(ipa_path, workdir):
         _orig_domains |= set(bin_strings.get("domains", []))
         _orig_http |= set(bin_strings.get("insecure_http_urls", []))
         ignored_urls.extend(bin_strings.get("ignored_urls", []))
+    for _d in dylib_analysis:
+        if _d.get("path") not in _added_paths and not _d.get("unavailable"):
+            _orig_domains |= set(_d.get("domains", []))
     result["_original_domains"] = sorted(_orig_domains)
     for d in dylib_analysis:
         if not d.get("unavailable"):
@@ -2718,8 +2789,21 @@ def scan_ipa(ipa_path, workdir):
 
     # Third-party tampering verdict (v4) — before risk scoring, so the
     # risk breakdown can attribute tweak findings to the tweak.
-    result["tampering"] = detect_tampering(
-        result, dylib_analysis, deb_packages, substrate_files)
+    # v10: every added part (dylib OR framework) analysed on its own.
+    _app_profile = deep_scan.known_app(result["identity"].get("bundle_id"))
+    _own_suffixes = tuple((_app_profile or {}).get("domains", ()))
+    _orig_set = set(_orig_domains)
+    for _p in _added_parts:
+        deep_scan.analyze_part(_p, app_dir, _orig_set, _own_suffixes, _tracker_family,
+                               url_classifier=classify_url)
+    result["tampering"] = deep_scan.build_tampering(
+        _added_parts, _added_extra, deb_packages, _orig_set,
+        [a["marker"] for a in result.get("jailbreak_artifacts", [])])
+    result["known_app"] = ({"name": _app_profile["name"], "domains": list(_own_suffixes)}
+                           if _app_profile else None)
+    result["domains_compact"] = deep_scan.compact_domains(domains)
+    result["own_domains_compact"] = deep_scan.compact_domains(
+        [d for d in _orig_set if not _tracker_family(d)])
     # Jailbreak/substrate artifact strings are weaker evidence than an
     # injected dylib: they join the evidence list but do not by
     # themselves flip the verdict. v7: they are AMBIGUOUS — the same
@@ -2777,9 +2861,11 @@ def scan_ipa(ipa_path, workdir):
             category="network")
     if result["ats"]["allows_arbitrary_loads_for_media"]:
         add(3, "NSAllowsArbitraryLoadsForMedia فعال است", category="network")
-    if http_urls:
-        add(min(9, 3 * len(http_urls)),
-            f"{len(http_urls)} آدرس http:// ناامن (واقعی) پیدا شد", category="network")
+    _http_real = [u for u in http_urls
+                  if not deep_scan.is_noise_domain(safe_hostname(u) or "")]
+    if _http_real:
+        add(min(9, 3 * len(_http_real)),
+            f"{len(_http_real)} آدرس http:// ناامن (واقعی) پیدا شد", category="network")
     if result["ats"]["exception_domains"]:
         add(3, f"دامنه‌های استثنا در ATS: {', '.join(result['ats']['exception_domains'])}",
             category="network")
@@ -2932,25 +3018,20 @@ def scan_ipa(ipa_path, workdir):
     # channel. Keychain/dyld/runtime patterns inside an added part
     # with NO server are info only (0 points). Non-injected dylibs
     # are still scored individually (source "original").
+    # v10: NO points for being unlocked. Only what an added part can
+    # actually DO with your data scores (category "tweak"):
+    #   danger (complete path: personal data + send + unknown server,
+    #           or a known data-drop endpoint) ........ 25 per part
+    #   review (talks to a server that is not the app's own) ..... 10
     tamp = result.get("tampering") or {}
     injected_names = {d["name"] for d in tamp.get("injected_dylibs", [])}
-    _exfil = _exfiltration_evidence(result)
-    tamp["exfiltration"] = _exfil
-    if _exfil["has_unknown_server"]:
-        add(15, f"بخش اضافه با سرور ناشناس حرف می‌زند: "
-                f"{', '.join(_exfil['unknown_servers'])}",
-            source="tweak", category="tweak", confidence="high",
-            tier="proven")
-    if _exfil["confirmed"]:
-        add(7, f"نقطه‌ی آپلود عکس/فایل هست "
-                f"({', '.join(_exfil['upload_domains'])}) و بخش اضافه "
-                f"سرور ناشناس دارد — مسیر ارسال کامل است",
-            source="tweak", category="tweak", confidence="high",
-            tier="proven")
-    if _exfil["has_unknown_server"] and _exfil["keychain_in_tweak"]:
-        add(3, "بخش اضافه به کی‌چین دسترسی دارد و سرور ناشناس هم دارد",
-            source="tweak", category="tweak", confidence="medium",
-            tier="capability")
+    for _p in tamp.get("added_parts", []):
+        if _p.get("verdict") == "danger":
+            add(25, f"بخش اضافه {_p['name']}: {_p.get('why_fa', '')}",
+                source="tweak", category="tweak", confidence="high", tier="proven")
+        elif _p.get("verdict") == "review":
+            add(10, f"بخش اضافه {_p['name']}: {_p.get('why_fa', '')}",
+                source="tweak", category="tweak", confidence="medium", tier="capability")
     for d in dylib_analysis:
         if d.get("name") in injected_names:
             continue  # v9: added-part patterns score only via the
@@ -2975,11 +3056,26 @@ def scan_ipa(ipa_path, workdir):
     # "کم"). The only floor left is for CONFIRMED exfiltration
     # (added part with its own unknown server AND an upload endpoint):
     # proven sending is never "low risk", even on a clean original.
-    level = "کم" if score < 30 else ("متوسط" if score < 60 else "بالا")
-    if _exfil["confirmed"] and level == "کم":
-        level = "متوسط"
-    original_points = sum(b.get("points", 0) for b in breakdown if b.get("source") != "tweak")
+    # v10 — the score follows REAL danger. The original app's normal
+    # things (its own permissions, analytics SDKs, ATS flags …) are the
+    # same in the App Store version, so they are compressed into 0–25
+    # ("low"); only the added parts can lift the score into amber/red.
+    original_raw = sum(b.get("points", 0) for b in breakdown if b.get("source") != "tweak")
     tweak_points = sum(b.get("points", 0) for b in breakdown if b.get("source") == "tweak")
+    original_points = round(min(original_raw, 90) * 25 / 90)
+    _safety = tamp.get("safety", "ok")
+    if _safety == "danger":
+        score = min(100, 70 + min(original_points, 10) + min(tweak_points, 20))
+        level = "بالا"
+    elif _safety == "review":
+        score = 30 + min(original_points, 15)
+        level = "متوسط"
+    else:
+        score = original_points
+        level = "کم"
+    breakdown.append({"points": 0, "source": "original", "category": "code",
+                      "reason": f"امتیاز خام برنامه‌ی اصلی {original_raw} بود و به مقیاس ۰ تا ۲۵ "
+                                f"تبدیل شد ({original_points}) — این موارد در نسخه‌ی اپ‌استوری هم هست"})
     result["risk"] = {"score": score, "level_fa": level,
                       "level_en": {"کم": "low", "متوسط": "medium",
                                    "بالا": "high"}[level],
@@ -2990,6 +3086,7 @@ def scan_ipa(ipa_path, workdir):
                       "tweak_points": tweak_points,
                       "capped_notes": {k: v for k, v in capped_by_cat.items() if v},
                       "purpose_exempt": purpose_exempt,
+                      "original_raw_points": original_raw,
                       "reasons": [b["reason"] for b in breakdown]}
 
     # ---- Per-finding severity list (v3) ----
@@ -3050,7 +3147,7 @@ def scan_ipa(ipa_path, workdir):
     }
 
     # ---- Answers to the privacy questions (Picsart-style + tampering) ----
-    result["privacy_answers"] = build_privacy_answers(result)
+    result["privacy_answers"] = deep_scan.build_answers(result)
     result.pop("_original_domains", None)
     return result
 
@@ -3085,49 +3182,12 @@ def render_report(r):
     # about the mod itself. The conclusion is one of:
     # "شواهدی از ارسال داده نیست" / "سرور ناشناس هست ولی مدرکی از
     # ارسال نیست" / "ارسال داده تأیید شد".
-    L.append("## نسخه آنلاک شده — بخش‌های اضافه")
-    L.append(f"**وضعیت: {tamp.get('verdict_fa', '—')}**")
-    _exfil = (tamp.get("exfiltration") or _exfiltration_evidence(r))
-    if _exfil.get("confirmed"):
-        L.append(f"**ارسال داده تأیید شد — بخش اضافه با سرور ناشناس "
-                 f"{', '.join(_exfil.get('unknown_servers', []))} حرف می‌زند و "
-                 f"نقطه‌ی آپلود ({', '.join(_exfil.get('upload_domains', []))}) هم هست.**")
-    elif _exfil.get("has_unknown_server"):
-        L.append(f"- ⚠️ سرور ناشناخته‌ی بخش اضافه: "
-                 f"{', '.join(_exfil.get('unknown_servers', []))} — مدرکی از "
-                 f"ارسال عکس/فایل به آن نیست.")
-    else:
-        L.append("- شواهدی از ارسال داده نیست.")
-    if tamp.get("signals"):
-        L.append(f"- نشانه‌های بخش اضافه ({tamp.get('signal_count', len(tamp['signals']))} مورد): "
-                 + "؛ ".join(tamp["signals"]))
-    if not tamp.get("unknown_tweak_servers"):
-        L.append(f"- {tamp.get('server_note_fa', '')}")
-    if tamp.get("tweak_deb_packages"):
-        L.append(f"- بسته‌های .deb بخش اضافه: {', '.join(tamp['tweak_deb_packages'])}")
+    # v10: the added-part section comes from deep_scan (load-command
+    # based detection, per-part servers / hidden addresses / data access).
+    L.extend(deep_scan.render_added_parts_md(r))
     _jb_markers = sorted({a["marker"] for a in (r.get("jailbreak_artifacts") or [])})
     if _jb_markers:
-        L.append(f"- رشته‌های مسیر جیلبریک در کد (مبهم — ممکن است کد تشخیص جیلبریک خود برنامه باشد، نه مدرک ارسال داده): {', '.join(_jb_markers)}")
-    if tamp.get("injected_dylibs"):
-        L.append("")
-        L.append("### بخش‌های اضافه (dylib) — هر کدام جدا")
-        for d in tamp["injected_dylibs"]:
-            L.append(f"#### `{d['path']}` — {d.get('size_bytes', 0):,} بایت")
-            for reason in d.get("reasons_fa", []):
-                L.append(f"- چرا اضافه است: {reason}")
-            if d.get("domains"):
-                L.append(f"- دامنه‌های این dylib: {', '.join(d['domains'])}")
-            else:
-                L.append("- دامنه/سروری در رشته‌های این dylib پیدا نشد.")
-            if d.get("insecure_http_urls"):
-                L.append(f"- لینک ناامن http در این dylib: {', '.join(d['insecure_http_urls'][:5])}")
-            if d.get("unavailable"):
-                L.append(f"- ⚠️ در دسترس نیست: {d['unavailable']}")
-            L.append("- جزئیات کامل الگوهای این dylib در بخش «کتابخانه‌های داینامیک» است.")
-        L.append("")
-        L.append("الگوهای این dylibها به‌تنهایی امتیازی ندارند؛ فقط وقتی امتیاز "
-                 "می‌گیرند که بخش اضافه سرور ناشناس داشته باشد (خطر ارسال داده)؛ "
-                 "جزئیات امتیاز در بخش «چرا این امتیاز؟» است.")
+        L.append(f"- رشته‌های مسیر جیلبریک در کد (مبهم — معمولاً کد تشخیص جیلبریک خود برنامه است): {', '.join(_jb_markers)}")
     L.append("- محدودیت‌ها: پایین گزارش، بخش «محدودیت‌های اسکن».")
     L.append("")
     if r.get("privacy_answers"):
@@ -3168,7 +3228,7 @@ def render_report(r):
         # weather app.
         for _ex in (r["risk"].get("purpose_exempt") or []):
             L.append(f"- امتیازی نگرفت: {_ex}")
-        L.append("- جمع امتیازهای بالا دقیقاً برابر ریسک کلی است (بدون دوباره‌شماری).")
+        L.append("- امتیاز برنامه‌ی اصلی به ۰ تا ۲۵ فشرده می‌شود (این موارد در نسخه‌ی اپ‌استوری هم هست)؛ فقط بخش‌های اضافه‌ی خطرناک امتیاز را به زرد/قرمز می‌برند.")
         L.append("- امتیاز حکم امنیتی نیست؛ فقط نشان می‌دهد چند قانون رد شده است و چرا — یک برنامه می‌تواند امتیاز بالا بگیرد و خطر واقعی‌اش کم باشد، یا برعکس.")
         L.append("")
     L.append("---")
@@ -3414,25 +3474,11 @@ def render_report(r):
                          + "؛ ".join(_parts))
     L.append("")
     L.append(f"## URL Schemes: {', '.join(r.get('url_schemes', [])) or '—'}")
-    L.append(f"## دامنه‌ها ({len(r.get('domains',[]))}) و URLها ({r.get('url_count',0)})")
-    _groups = r.get("domain_groups") or {}
-    if _groups:
-        L.append("- دامنه‌ها بر اساس نوع (گروه‌بندی تقریبی بر اساس نام دامنه): "
-                 + "، ".join(f"{k} {v}" for k, v in _groups.items()))
-    for d in r.get("domain_analysis", [])[:50]:
-        flags = []
-        if d.get("is_tracker_domain"):
-            flags.append("ترکر/تبلیغات")
-        if d.get("in_tracking_manifest"):
-            flags.append("در مانیفست ردیابی")
-        if d.get("http_only"):
-            flags.append("فقط http")
-        if d.get("is_ip_literal"):
-            flags.append("IP مستقیم")
-        L.append(f"- {d['domain']}" + (f" — {', '.join(flags)} (ریسک {d['risk_points']}, {d['severity']})" if flags else ""))
-    if not r.get("domain_analysis"):
-        for d in r.get("domains", [])[:50]:
-            L.append(f"- {d}")
+    # v10: deduplicated, noise-filtered, grouped by company domain.
+    L.extend(deep_scan.render_domains_md(r))
+    if r.get("known_app"):
+        L.append(f"- برنامه‌ی شناخته‌شده: {r['known_app']['name']} — دامنه‌های رسمی: "
+                 + "، ".join(r["known_app"]["domains"]))
     if r.get("insecure_http_urls"):
         L.append("")
         L.append("### ⚠️ URLهای ناامن http:// (فقط آدرس‌های واقعی شبکه)")
@@ -3513,21 +3559,11 @@ def render_report(r):
 
 
 def render_customer_report(r):
-    """Customer-safe report (v9) — the log Erfan forwards to the
-    customer. Plain language only: app name, one-line verdict, the
-    questions with decisive plain answers, and a few plain sentences.
+    """Customer-safe report (v10) — plain language, calm, honest.
 
-    Deliberately NOT in here: severity labels, technical finding
-    names (keychain / dyld / sysctl / dlopen / pasteboard …),
-    domain/URL lists, per-pattern risk breakdowns with (+N) numbers,
-    bundle IDs, hashes, entitlements, Mach-O details, raw server
-    addresses, or the words for the mod as a warning. A non-technical
-    customer reading the whole log must come away calm, not scared.
-    The full technical detail lives in render_report (the deep log
-    for Erfan) and in the JSON — never in this file. Answers are
-    shown WITHOUT their evidence lines: the evidence can name raw
-    domains and dylib internals, which is exactly what must not
-    reach a customer.
+    App name, one-line verdict, the questions with plain answers, and
+    ONE short limitation line. No jargon, no domains, no hashes. Never
+    promises 100% safety; never scares without evidence.
     """
     L = []
     ident = r.get("identity", {}) or {}
@@ -3535,40 +3571,35 @@ def render_customer_report(r):
     verdict_a = answers.get("verdict", {}) or {}
     name = ident.get("display_name") or "برنامه"
     version = ident.get("version") or "—"
-
-    L.append(f"# گزارش بررسی برنامه — {name}")
+    L.append(f"# گزارش بررسی امنیت و حریم خصوصی — {name}")
     L.append("")
     L.append(f"نسخه {version}")
     L.append("")
-    L.append(f"**{verdict_a.get('answer_fa', '—')}**")
+    _icon = {"good": "✅", "neutral": "ℹ️", "warn": "🔎", "bad": "⛔"}.get(verdict_a.get("tone"), "")
+    L.append(f"**{_icon} {verdict_a.get('answer_fa', '—')}**")
     L.append("")
-    if r.get("risk"):
-        L.append(f"امتیاز بررسی: {r['risk']['score']} از 100 — "
-                 f"هرچه عدد کمتر باشد، بهتر است.")
-        L.append("")
     L.append("## سؤال‌های مهم")
     L.append("")
     for a in (r.get("privacy_answers", []) or []):
         if a.get("id") == "verdict":
-            continue  # the verdict is the headline above, not a question
+            continue
         L.append(f"### {a['question_fa']}")
-        L.append(f"**{a['answer_fa']}**")
+        L.append(f"{a['answer_fa']}")
         L.append("")
-    L.append("## این بررسی چه چیزی را می‌گوید")
-    L.append("- فایل برنامه بررسی شد: دسترسی‌ها، جاهایی که اطلاعات "
-             "می‌تواند برود، و بخش‌های اضافه‌ی نسخه‌ی آنلاک.")
-    L.append("- این بررسی فقط چیزهایی را می‌بیند که داخل فایل برنامه "
-             "نوشته شده است.")
+    L.append("### آیا این نسخه از نظر امنیت و حریم خصوصی بررسی شده است؟")
+    L.append(verdict_a.get("checked_fa") or "بله.")
+    L.append("")
+    L.append("## یک نکته")
+    L.append("- " + deep_scan.LIMIT_LINE_FA)
     if r.get("binary", {}).get("encrypted") is True:
-        L.append("- بخشی از فایل برنامه قفل بود و کامل بررسی نشد؛ برای "
-                 "بررسی کامل، نسخه‌ی بازشده لازم است.")
+        L.append("- بخش اصلی این فایل قفل (رمزگذاری‌شده) بود؛ بخش‌های اضافه‌شده کامل بررسی شدند.")
     L.append("")
     L.append("sibstars.ir")
     return "\n".join(L) + "\n"
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="SibStar IPA scanner v9 (deep scan)")
+    ap = argparse.ArgumentParser(description="SibStar IPA scanner v10 (deep scan)")
     ap.add_argument("ipa", help="Path to .ipa file")
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument("--report", dest="report_out", default=None)
@@ -3578,6 +3609,9 @@ def main(argv=None):
     workdir = args.workdir or tempfile.mkdtemp(prefix="ipa-scan-v3-")
     try:
         result = scan_ipa(args.ipa, workdir)
+    except ScanLimitError as e:
+        print(f"LIMIT: {e.message_fa}", file=sys.stderr)
+        return 3
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2

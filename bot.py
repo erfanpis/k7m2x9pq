@@ -74,7 +74,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from scanner import scan_ipa, render_report
+from scanner import scan_ipa, render_report, ScanLimitError
 
 try:
     from telethon import TelegramClient, events
@@ -180,6 +180,25 @@ def check_size_limit(size_bytes):
     return None
 
 
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._\-\u0600-\u06FF ]+")
+
+
+def sanitize_filename(name, default="app.ipa"):
+    """v10: a Telegram/URL file name is untrusted input. Keep only the
+    last path component, drop path separators / control characters /
+    leading dots, cap the length, and keep the .ipa suffix — so a name
+    like "../../x.ipa" or "/etc/x.ipa" can never leave the temp dir."""
+    base = (name or "").replace("\\", "/").split("/")[-1]
+    base = _SAFE_NAME_RE.sub("_", base).strip(" .")
+    if not base:
+        return default
+    stem, dot, ext = base.rpartition(".")
+    if not dot:
+        return base[:80]  # no extension: validate_file() will reject it
+    stem = stem[:80] or "app"
+    return f"{stem}.{ext[:8]}"
+
+
 def validate_file(file_name, file_size):
     """Persian error message for a Telegram document, else None."""
     if not (file_name or "").lower().endswith(".ipa"):
@@ -224,17 +243,11 @@ def check_disk_space(directory, needed_bytes):
 
 
 def build_summary(r):
-    """The short Persian summary the bot sends as a chat message.
+    """Short Persian chat summary for the owner (v10).
 
-    v9: short and professional — the final verdict first, then the
-    (calm, capped) risk with its original/added-part split, then the
-    four privacy answers in one line each. The unlocked version is
-    NORMAL in this store: it is stated ONCE, neutrally ("نسخه آنلاک
-    شده"), never as a warning and never with the word for it as a
-    scary label. Only real exfiltration evidence (an unknown server
-    of an added part) is a warning. Permissions, trackers, domains
-    and dylib counts are NOT repeated here: they are on the card and
-    in the full reports. No alarmist wording.
+    Verdict first (calm, honest), the score, the unlocked fact stated
+    neutrally, and — only for the owner — any added part that needs a
+    look. Never promises 100% safety; never scares without evidence.
     """
     ident = r.get("identity", {})
     risk = r.get("risk", {})
@@ -242,41 +255,33 @@ def build_summary(r):
     tamp = r.get("tampering") or {}
     answers = {a["id"]: a for a in (r.get("privacy_answers", []) or [])}
     verdict_a = answers.get("verdict", {}) or {}
-    mark = "✅" if verdict_a.get("verdict") == "ok" else "⚠️"
-    lines = [f"{mark} اسکن {name} تمام شد — {verdict_a.get('answer_fa', '')}"]
-    lines.append(f"📊 ریسک: {risk.get('score', '?')}/100 — {risk.get('level_fa', '')} "
-                 f"(برنامه‌ی اصلی: {risk.get('original_points', '?')}، بخش اضافه: {risk.get('tweak_points', '?')})")
+    mark = {"good": "✅", "neutral": "ℹ️", "warn": "🔎", "bad": "⛔"}.get(verdict_a.get("tone"), "✅")
+    lines = [f"{mark} اسکن {name} {ident.get('version') or ''} تمام شد — {verdict_a.get('answer_fa', '')}"]
+    lines.append(f"📊 امتیاز: {risk.get('score', '?')}/100 — {risk.get('level_fa', '')}")
+    parts = tamp.get("added_parts") or []
     if tamp.get("tampered"):
-        lines.append(f"🔓 نسخه آنلاک شده — {tamp.get('injected_dylib_count', 0)} بخش اضافه دارد")
-        if tamp.get("unknown_tweak_servers"):
-            lines.append("⚠️ سرور ناشناخته‌ی بخش اضافه: "
-                         + "، ".join(tamp["unknown_tweak_servers"]))
-        else:
-            lines.append("✅ شواهدی از ارسال داده نیست")
+        lines.append(f"🔓 نسخه آنلاک — {len(parts)} بخش اضافه: "
+                     + "، ".join(f"{p['name']}" for p in parts[:6]))
     else:
-        lines.append("🔓 نسخه آنلاک شده: نه")
+        lines.append("🔓 نسخه‌ی اصلی — چیزی اضافه نشده")
+    flagged = [p for p in parts if p.get("verdict") in ("danger", "review")]
+    for p in flagged[:3]:
+        icon = "⛔" if p["verdict"] == "danger" else "🔎"
+        lines.append(f"{icon} {p['name']}: {p.get('why_fa', '')}")
+    if r.get("known_app"):
+        lines.append(f"🏷 برنامه‌ی شناخته‌شده: {r['known_app']['name']} (سرورهای رسمی‌اش ناشناس حساب نمی‌شوند)")
     if r.get("binary", {}).get("encrypted") is True:
-        lines.append("🔒 باینری رمزگذاری‌شده (FairPlay) است — تحلیل رشته‌های باینری انجام نشد.")
+        lines.append("🔒 باینری اصلی قفل (FairPlay) است؛ بخش‌های اضافه کامل بررسی شدند.")
     if answers:
         lines.append("")
-        lines.append("🔐 حریم خصوصی:")
-        # v8: photo questions exist only when the app can READ photos.
-        # Otherwise there is ONE plain "does not apply" line — the
-        # three photo answers do not exist for such an app, so the
-        # fixed loop below would print nothing about photos at all.
-        _photo_rows = (("sends_photos_to_server", "ارسال عکس به سرور"),
-                       ("third_party_can_see_photos", "دسترسی شخص ثالث به عکس"),
-                       ("collects_photo_info", "جمع‌آوری اطلاعات عکس")) \
-            if "sends_photos_to_server" in answers else \
-            (("photos_not_applicable", "عکس‌ها"),) \
-            if "photos_not_applicable" in answers else ()
-        for qid, label in (("tampering", "نسخه آنلاک شده"), *_photo_rows):
-            a = answers.get(qid)
-            if a:
-                lines.append(f"• {label}: {a['answer_fa']}")
+        lines.append("🔐 پاسخ‌ها:")
+        for a in r.get("privacy_answers", []):
+            if a.get("id") == "verdict":
+                continue
+            lines.append(f"• {a.get('card_fa') or a.get('answer_fa')}")
     lines.append("")
-    lines.append("📄 کارت تصویری، گزارش مشتری (برای ارسال به کاربر)، گزارش فنی کامل "
-                 "(فقط برای خودت) و فایل فنی JSON ضمیمه شد. فایل IPA حذف شد.")
+    lines.append("📄 کارت، گزارش مشتری (برای ارسال به کاربر)، گزارش فنی کامل (فقط برای خودت) "
+                 "و JSON ضمیمه شد. فایل IPA حذف شد.")
     return "\n".join(lines)
 
 
@@ -285,7 +290,7 @@ HELP_FA = (
     "یک فایل .ipa برام بفرست، یا لینک مستقیم دانلود یک فایل .ipa بده، تا امنیت و "
     "حریم خصوصی‌ش رو بررسی کنم و گزارش بدم.\n\n"
     "چی بررسی می‌شه:\n"
-    "• نسخه آنلاک شده: آیا بخش اضافه‌ای دارد و داده به سرور ناشناس می‌فرستد؟\n"
+    "• نسخه آنلاک: چه چیزی به برنامه اضافه شده (از روی دستورهای بارگذاری)، و آیا آن بخش سرور ناشناس، آدرس پنهان یا مسیر ارسال اطلاعات دارد؟\n"
     "• دسترسی‌ها (دوربین، میکروفون، لوکیشن، مخاطبین، ردیابی…)\n"
     "• مانیفست حریم خصوصی (PrivacyInfo.xcprivacy)\n"
     "• ترکرها و SDKها (Firebase، AppsFlyer و…)\n"
@@ -506,7 +511,7 @@ class ScannerBot:
         doc = getattr(message, "document", None)
         if doc is not None:
             f = getattr(message, "file", None)
-            file_name = (f.name if f and f.name else "app.ipa")
+            file_name = sanitize_filename(f.name if f and f.name else "app.ipa")
             file_size = (f.size if f and f.size else 0)
             err = validate_file(file_name, file_size)
             if err:
@@ -587,7 +592,7 @@ class ScannerBot:
         prog_msg = await event.reply(stage_text(1, "دانلود لینک…"))
         tracker = ProgressTracker()
         watcher = asyncio.create_task(progress_watcher(tracker, prog_msg, "لینک"))
-        file_name = Path(urllib.parse.urlparse(url).path).name or "app.ipa"
+        file_name = sanitize_filename(Path(urllib.parse.urlparse(url).path).name or "app.ipa")
         try:
             with tempfile.TemporaryDirectory(prefix="ipa-bot-") as tmp:
                 tmpdir = Path(tmp)
@@ -635,6 +640,12 @@ class ScannerBot:
         try:
             result = await loop.run_in_executor(
                 None, scan_ipa, ipa_path, tmpdir / "work")
+        except ScanLimitError as e:
+            # v10: a safety limit (zip bomb, too many files, broken ZIP)
+            # gets a clear Persian message, never "internal error".
+            await fail_progress(prog_msg, e.message_fa)
+            await self.reply(event, "⚠️ " + e.message_fa)
+            return
         except Exception:
             traceback.print_exc()
             await fail_progress(prog_msg, "اسکن ناموفق بود. لطفاً دوباره امتحان کن.")

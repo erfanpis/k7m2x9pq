@@ -11,8 +11,10 @@ on:
     - cron: "30 * * * *"
   workflow_dispatch:
 
+# v10: least privilege — the job only reads the code. The next job is
+# triggered with the separate RESPAWN_PAT secret, not GITHUB_TOKEN.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: telegram-poll

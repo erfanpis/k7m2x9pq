@@ -53,7 +53,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from scanner import _photo_upload_domains
 
 from PIL import Image, ImageDraw, ImageFont
 from PIL import features as _pil_features
@@ -122,140 +121,39 @@ PILL_AMBER = ((254, 243, 199), (146, 64, 14))
 PILL_SLATE = ((241, 245, 249), (51, 65, 85))
 
 
-def _customer_pill(qid, verdict):
-    """(pill text, (bg, fg)) for a privacy answer — plain words a
-    regular person understands, never a bare alarming "بله".
-
-    v9: the unlocked row is NEUTRAL — "بله" in grey/blue slate,
-    never red: an unlocked version is normal in this store. "نه"
-    (green) for the original version. "مشکوک" (amber) only when a
-    single weak signal was found.
-    "اعلام شده" for declared photo collection (a neutral fact, amber).
-    """
-    if verdict == "suspicious":
-        return "مشکوک", PILL_AMBER
-    if qid == "tampering":
-        return {"confirmed": ("بله", PILL_SLATE),
-                "no-evidence": ("نه", PILL_GREEN)}.get(verdict, ("—", PILL_SLATE))
-    if qid == "collects_photo_info":
-        return {"confirmed": ("اعلام شده", PILL_AMBER),
-                "no-evidence": ("نه", PILL_GREEN)}.get(verdict, ("—", PILL_SLATE))
-    # sends_photos_to_server / third_party_can_see_photos
-    if qid == "sends_photos_to_server":
-        return {"confirmed": ("فرستاده می‌شود", PILL_RED),
-                "no-evidence": ("نه", PILL_GREEN)}.get(verdict, ("—", PILL_SLATE))
-    return {"confirmed": ("دیده می‌شود", PILL_RED),
-            "no-evidence": ("نه", PILL_GREEN)}.get(verdict, ("—", PILL_SLATE))
-
-
-def _customer_answers(result, answers):
-    """Plain one-line answers for the questions, in the customer's
-    language. The scanner's answer_fa strings are for the detailed
-    .md report; the card rephrases them here so no jargon
-    ("نقطه‌ی آپلودی"، "dylib"، "توئیک") ever reaches a customer.
-
-    The answers follow the ANSWER VERDICTS, not a re-derivation:
-    when the verdict is "confirmed" (the dangerous case — the added
-    part has its own server AND a photo-upload endpoint exists), the
-    card says YES plainly. Otherwise it says a decisive "no".
-    The unlocked line states the fact ONCE, neutrally: this version
-    is unlocked, and either no data goes to an unknown server, or —
-    in the dangerous case — it does. No counts, no jargon.
-    """
-    tamp = result.get("tampering") or {}
-    _unknown = tamp.get("unknown_tweak_servers") or []
-    _upload = _photo_upload_domains(result.get("domains", []))
-    _dangerous = bool(_unknown and _upload)
-    out = {}
-    v5 = (answers.get("tampering", {}) or {}).get("verdict", "")
-    if v5 == "confirmed":
-        if _dangerous:
-            out["tampering"] = "این نسخه آنلاک شده است؛ اطلاعات به سرور ناشناس فرستاده می‌شود"
-        elif _unknown:
-            out["tampering"] = "این نسخه آنلاک شده است؛ با یک سرور ناشناس حرف می‌زند"
-        else:
-            out["tampering"] = "این نسخه آنلاک شده است؛ داده‌ای به سرور ناشناس فرستاده نمی‌شود"
-    elif v5 == "suspicious":
-        out["tampering"] = "یک بخش اضافه پیدا شد؛ مدرکی از ارسال داده نیست"
-    else:
-        out["tampering"] = "این نسخه آنلاک نشده است"
-    v1 = (answers.get("sends_photos_to_server", {}) or {}).get("verdict", "")
-    if v1 == "confirmed":
-        out["sends_photos_to_server"] = "عکس‌ها به یک آدرس ناشناس فرستاده می‌شوند"
-    else:
-        out["sends_photos_to_server"] = "عکس‌های شما جایی فرستاده نمی‌شود"
-    v2 = (answers.get("third_party_can_see_photos", {}) or {}).get("verdict", "")
-    if v2 == "confirmed":
-        out["third_party_can_see_photos"] = "عکس‌های شما به یک آدرس ناشناس می‌رسد"
-    else:
-        out["third_party_can_see_photos"] = "کسی عکس‌های شما را نمی‌بیند"
-    v3 = (answers.get("collects_photo_info", {}) or {}).get("verdict", "")
-    if v3 == "confirmed":
-        out["collects_photo_info"] = "در توضیحات برنامه اعلام شده است"
-    else:
-        # v8: decisive — "اعلام نشده است" hedged and implied it might
-        # still collect. The app does not collect photo info.
-        out["collects_photo_info"] = "این برنامه اطلاعات عکس جمع نمی‌کند"
-    return out
+_TONE_PILL = {"good": PILL_GREEN, "neutral": PILL_SLATE, "warn": PILL_AMBER, "bad": PILL_RED}
+_CARD_LABELS = {
+    "tampering": "نسخه آنلاک شده؟",
+    "sends_photos_to_server": "عکس‌ها به سرور می‌روند؟",
+    "third_party_can_see_photos": "سازنده‌ی نسخه/سیب‌استار عکس‌ها را می‌بیند؟",
+    "collects_photo_info": "اطلاعات عکس جمع می‌شود؟",
+    "photos_not_applicable": "عکس‌های شما",
+}
 
 
 def _card_questions(result, answers):
-    """The question rows the card actually shows — a list of
-    {"qid", "label", "pill", "text"} dicts.
-
-    v9: photo questions are shown ONLY when the app can READ photos.
-    Otherwise there is ONE plain row saying the app does not read
-    the user's photos (add-only: it can only save a screenshot).
-    The first row is always the unlocked question, neutral.
-    """
-    plain_answers = _customer_answers(result, answers)
+    """Rows for the card (v10): every answer carries its own calm
+    tone, pill word and one-line customer text (deep_scan.build_answers),
+    so the card never re-derives a verdict on its own."""
     rows = []
-    a = answers.get("tampering", {}) or {}
-    pill_text, pill_colors = _customer_pill("tampering", a.get("verdict", ""))
-    rows.append({"qid": "tampering", "label": "نسخه آنلاک شده؟",
-                 "pill": (pill_text, pill_colors),
-                 "text": plain_answers.get("tampering", "")})
-    if result.get("photo_read_access", True):
-        for qid, label in (
-                ("sends_photos_to_server", "عکس‌ها فرستاده می‌شوند؟"),
-                ("third_party_can_see_photos", "کسی دیگر عکس‌ها را می‌بیند؟"),
-                ("collects_photo_info", "اطلاعات عکس جمع می‌شود؟")):
-            a = answers.get(qid, {}) or {}
-            pill_text, pill_colors = _customer_pill(qid, a.get("verdict", ""))
-            rows.append({"qid": qid, "label": label,
-                         "pill": (pill_text, pill_colors),
-                         "text": plain_answers.get(qid, "")})
-    else:
-        # v8: one plain row, not three photo questions the app
-        # cannot answer — it never touches the user's photos.
-        if result.get("photo_access") == "add-only":
-            text = ("این برنامه عکس‌های شما را نمی‌خواند؛ فقط می‌تواند "
-                    "اسکرین‌شات ذخیره کند")
-        else:
-            text = "این برنامه به عکس‌های شما دسترسی ندارد"
-        rows.append({"qid": "photos_not_applicable", "label": "عکس‌های شما",
-                     "pill": ("نه", PILL_GREEN), "text": text})
+    for a in (result.get("privacy_answers") or []):
+        qid = a.get("id")
+        if qid == "verdict" or qid not in _CARD_LABELS:
+            continue
+        rows.append({"qid": qid, "label": _CARD_LABELS[qid],
+                     "pill": (a.get("pill_fa") or "—",
+                              _TONE_PILL.get(a.get("tone"), PILL_SLATE)),
+                     "text": a.get("card_fa") or a.get("answer_fa", "")})
     return rows
 
 
 def _customer_headline(result, level_en):
-    """The verdict as ONE friendly sentence a regular person
-    understands. v9: the verdict is about DATA SAFETY, not about the
-    mod — a modded app with no exfiltration evidence gets the calm
-    "no problem" headline. Only confirmed sending (the added part's
-    own unknown server AND an upload endpoint) gets the decisive
-    "don't install" headline. Otherwise the headline follows the
-    risk level."""
-    tamp = result.get("tampering") or {}
-    _unknown = tamp.get("unknown_tweak_servers") or []
-    _upload = _photo_upload_domains(result.get("domains", []))
-    if _unknown and _upload:
-        return "این نسخه اطلاعات شما را به سروری ناشناس می‌فرستد؛ نصب نکنید"
-    if level_en == "low":
-        return "مشکلی پیدا نشد؛ با خیال راحت استفاده کنید"
-    if level_en == "medium":
-        return "خطر جدی پیدا نشد؛ چند نکته‌ی کوچک هست"
-    return "چند نکته‌ی مهم پیدا شد؛ با احتیاط استفاده کنید"
+    """The final verdict sentence (v10) — honest and calm. Never
+    "100% safe"; "نشانه‌ی خطری پیدا نشد" when nothing risky was found."""
+    for a in (result.get("privacy_answers") or []):
+        if a.get("id") == "verdict" and a.get("answer_fa"):
+            return a["answer_fa"]
+    return "نشانه‌ی خطری پیدا نشد"
 
 
 FONT_CANDIDATES = [
@@ -499,7 +397,7 @@ def generate_report_card(result, out_path):
     y += 22
     H = y + 100
     f_foot = load_font(21)
-    draw.text((W - M, H - 88), fa("این بررسی فقط روی فایل برنامه انجام شده است."),
+    draw.text((W - M, H - 88), fa("بررسی روی فایل برنامه انجام شد؛ هیچ بررسی‌ای تضمین ۱۰۰٪ نیست."),
               font=f_foot, fill=MUTED + (255,), anchor="ra")
     draw.text((W - M, H - 54), fa("sibstars.ir"), font=f_foot,
               fill=MUTED + (255,), anchor="ra")
